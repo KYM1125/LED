@@ -48,14 +48,14 @@ class LEDInitializer(nn.Module):
 
 		mean_total = torch.cat((ego_mean_embed, social_embed), dim=-1)
 		
-		guess_mean = self.mean_decoder(mean_total).contiguous().view(-1, self.fut_len, 2)
+		guess_mean = self.mean_decoder(mean_total).contiguous().view(-1, self.fut_len, 2) # B, T, 2
 
 		scale_total = torch.cat((ego_scale_embed, social_embed), dim=-1)
-		guess_scale = self.scale_decoder(scale_total)
+		guess_scale = self.scale_decoder(scale_total) # B, 1
 
-		guess_scale_feat = self.scale_encoder(guess_scale)
-		var_total = torch.cat((ego_var_embed, social_embed, guess_scale_feat), dim=-1)
-		guess_var = self.var_decoder(var_total).reshape(x.size(0), self.n, self.fut_len, 2)
+		guess_scale_feat = self.scale_encoder(guess_scale) 
+		var_total = torch.cat((ego_var_embed, social_embed, guess_scale_feat), dim=-1) 
+		guess_var = self.var_decoder(var_total).reshape(x.size(0), self.n, self.fut_len, 2) # B, K, T, 2
 
 		return guess_var, guess_mean, guess_scale
 

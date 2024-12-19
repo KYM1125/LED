@@ -62,6 +62,12 @@ class Trainer:
 		self.n_steps = self.cfg.diffusion.steps # define total diffusion steps
 
 		# make beta schedule and calculate the parameters used in denoising process.
+		'''
+			schedule: 控制噪声调度的方式（如线性、cosine等）。
+			n_timesteps: 时间步数，表示整个扩散过程分为多少个步骤。
+			start: 在扩散的开始时，噪声强度的起始值。
+			end: 在扩散的结束时，噪声强度的结束值。
+		'''
 		self.betas = self.make_beta_schedule(
 			schedule=self.cfg.diffusion.beta_schedule, n_timesteps=self.n_steps, 
 			start=self.cfg.diffusion.beta_start, end=self.cfg.diffusion.beta_end).cuda()
@@ -174,22 +180,22 @@ class Trainer:
 		sample = mean + sigma_t * z
 		return (sample)
 	
-	def p_sample_accelerate(self, x, mask, cur_y, t):
+	def p_sample_accelerate(self, x, mask, cur_y, t): # 去噪过程
 		if t==0:
 			z = torch.zeros_like(cur_y).to(x.device)
 		else:
 			z = torch.randn_like(cur_y).to(x.device)
 		t = torch.tensor([t]).cuda()
 		# Factor to the model output
-		eps_factor = ((1 - self.extract(self.alphas, t, cur_y)) / self.extract(self.one_minus_alphas_bar_sqrt, t, cur_y))
+		eps_factor = ((1 - self.extract(self.alphas, t, cur_y)) / self.extract(self.one_minus_alphas_bar_sqrt, t, cur_y)) # 去噪强度
 		# Model output
-		beta = self.extract(self.betas, t.repeat(x.shape[0]), cur_y)
-		eps_theta = self.model.generate_accelerate(cur_y, beta, x, mask)
-		mean = (1 / self.extract(self.alphas, t, cur_y).sqrt()) * (cur_y - (eps_factor * eps_theta))
+		beta = self.extract(self.betas, t.repeat(x.shape[0]), cur_y) # beta 参数控制在每一步扩散过程中，噪声加入的程度。
+		eps_theta = self.model.generate_accelerate(cur_y, beta, x, mask)# cur_y: [22,10,20,2], beta: [22,1,1,1], x: [22,10,6], mask: [22,22] # 预测的噪声
+		mean = (1 / self.extract(self.alphas, t, cur_y).sqrt()) * (cur_y - (eps_factor * eps_theta)) # 去噪后的均值
 		# Generate z
-		z = torch.randn_like(cur_y).to(x.device)
+		z = torch.randn_like(cur_y).to(x.device) # 随机噪声
 		# Fixed sigma
-		sigma_t = self.extract(self.betas, t, cur_y).sqrt()
+		sigma_t = self.extract(self.betas, t, cur_y).sqrt() # 扩散过程的标准差，决定每一步噪声的幅度
 		sample = mean + sigma_t * z * 0.00001
 		return (sample)
 
