@@ -30,7 +30,6 @@ class LEDInitializer(nn.Module):
 		self.var_decoder = MLP(256*2+32, self.output_dim, hid_feat=(1024, 1024), activation=nn.ReLU())
 		self.mean_decoder = MLP(256*2, t_f * d_f, hid_feat=(256, 128), activation=nn.ReLU())
 		self.scale_decoder = MLP(256*2, 1, hid_feat=(256, 128), activation=nn.ReLU())
-
 	
 	def forward(self, x, mask=None):
 		'''
@@ -44,12 +43,11 @@ class LEDInitializer(nn.Module):
 		ego_var_embed = self.ego_var_encoder(x)
 		ego_mean_embed = self.ego_mean_encoder(x)
 		ego_scale_embed = self.ego_scale_encoder(x)
-		# B, 256
 
 		mean_total = torch.cat((ego_mean_embed, social_embed), dim=-1)
 		
 		guess_mean = self.mean_decoder(mean_total).contiguous().view(-1, self.fut_len, 2) # B, T, 2
-
+		
 		scale_total = torch.cat((ego_scale_embed, social_embed), dim=-1)
 		guess_scale = self.scale_decoder(scale_total) # B, 1
 

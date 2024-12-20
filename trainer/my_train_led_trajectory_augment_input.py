@@ -16,6 +16,7 @@ from data.dataloader_nba import NBADataset, seq_collate
 
 from models.model_led_initializer import LEDInitializer as InitializationModel
 from models.model_diffusion import TransformerDenoisingModel as CoreDenoisingModel
+from models.model_led_initializer_with_intention import VecIntInitializer as MyInitializationModel
 
 import pdb
 NUM_Tau = 5
@@ -84,7 +85,7 @@ class Trainer:
 		model_cp = torch.load(self.cfg.pretrained_core_denoising_model, map_location='cpu')
 		self.model.load_state_dict(model_cp['model_dict'])
 
-		self.model_initializer = InitializationModel(t_h=10, d_h=6, t_f=20, d_f=2, k_pred=20).cuda()
+		self.model_initializer = MyInitializationModel(t_h=10, d_h=6, t_f=20, d_f=2, k_pred=20).cuda()
 
 		self.opt = torch.optim.AdamW(self.model_initializer.parameters(), lr=config.learning_rate)
 		self.scheduler_model = torch.optim.lr_scheduler.StepLR(self.opt, step_size=self.cfg.decay_step, gamma=self.cfg.decay_gamma)
@@ -244,10 +245,13 @@ class Trainer:
 	def fit(self):
 		# Training loop
 		for epoch in range(0, self.cfg.num_epochs):
-			loss_total, loss_distance, loss_uncertainty = self._train_single_epoch(epoch)
-			print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}'.format(
+			loss_total, loss_distance, loss_uncertainty, loss_intention = self._train_single_epoch(epoch)
+			# print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}'.format(
+			# 	time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
+			# 	epoch, loss_total, loss_distance, loss_uncertainty), self.log)
+			print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}\tLoss Intention: {:.6f}'.format(
 				time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
-				epoch, loss_total, loss_distance, loss_uncertainty), self.log)
+				epoch, loss_total, loss_distance, loss_uncertainty, loss_intention), self.log)
 			
 			if (epoch + 1) % self.cfg.test_interval == 0:
 				performance, samples = self._test_single_epoch()
@@ -278,14 +282,54 @@ class Trainer:
 			traj_mask[i*11:(i+1)*11, i*11:(i+1)*11] = 1.
 
 		initial_pos = data['pre_motion_3D'].cuda()[:, :, -1:]
+		
 		# augment input: absolute position, relative position, velocity
 		past_traj_abs = ((data['pre_motion_3D'].cuda() - self.traj_mean)/self.traj_scale).contiguous().view(-1, 10, 2)
 		past_traj_rel = ((data['pre_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 10, 2)
 		past_traj_vel = torch.cat((past_traj_rel[:, 1:] - past_traj_rel[:, :-1], torch.zeros_like(past_traj_rel[:, -1:])), dim=1)
+		past_traj_acc = torch.cat((past_traj_vel[:, 1:] - past_traj_vel[:, :-1], torch.zeros_like(past_traj_vel[:, -1:])), dim=1)
+		past_traj_vel_angle = torch.atan2(past_traj_vel[..., 1], past_traj_vel[..., 0])
+		past_traj_acc_angle = torch.atan2(past_traj_acc[..., 1], past_traj_acc[..., 0])
+		velocity_angle_change = torch.diff(past_traj_vel_angle, dim=1, prepend=torch.zeros_like(past_traj_vel_angle[:, :1]))
+		acceleration_angle_change = torch.diff(past_traj_acc_angle, dim=1, prepend=torch.zeros_like(past_traj_acc_angle[:, :1]))
 		past_traj = torch.cat((past_traj_abs, past_traj_rel, past_traj_vel), dim=-1)
+
+		fut_traj_abs = ((data['fut_motion_3D'].cuda() - self.traj_mean)/self.traj_scale).contiguous().view(-1, 20, 2)
+		fut_traj_rel = ((data['fut_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 20, 2)
+		fut_traj_vel = torch.cat((fut_traj_rel[:, 1:] - fut_traj_rel[:, :-1], torch.zeros_like(fut_traj_rel[:, -1:])), dim=1)
+		fut_traj_acc = torch.cat((fut_traj_vel[:, 1:] - fut_traj_vel[:, :-1], torch.zeros_like(fut_traj_vel[:, -1:])), dim=1)
+		fut_traj_vel_angle = torch.atan2(fut_traj_vel[..., 1], fut_traj_vel[..., 0])
+		fut_traj_acc_angle = torch.atan2(fut_traj_acc[..., 1], fut_traj_acc[..., 0])
+		velocity_angle_change_fut = torch.diff(fut_traj_vel_angle, dim=1, prepend=torch.zeros_like(fut_traj_vel_angle[:, :1]))
+		acceleration_angle_change_fut = torch.diff(fut_traj_acc_angle, dim=1, prepend=torch.zeros_like(fut_traj_acc_angle[:, :1]))
 
 		fut_traj = ((data['fut_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 20, 2)
 		return batch_size, traj_mask, past_traj, fut_traj
+
+	def compute_intention_loss(self, intention_estimation):
+		"""
+		计算行人意图的损失，使得意图向量的模长尽可能接近于 1。
+		:param intention_estimation: 预测的意图估计 (B, T, 3)
+		:return: intention loss
+		"""
+		# 计算每个时间步的意图向量的模长，使用完整的三维向量 (B, T, 3)
+		intention_magnitude = torch.norm(intention_estimation, p=2, dim=-1)  # (B, T)
+
+		# 目标是让模长接近于 1
+		target_magnitude = torch.ones_like(intention_magnitude)  # (B, T), 目标模长为 1
+
+		# 计算每个时间步的损失：模长与 1 之间的差异
+		intention_loss = torch.abs(intention_magnitude - target_magnitude)  # (B, T)
+
+		# 加权：随着时间推移，给未来的时间步加更大的权重
+		time_weights = torch.linspace(1.0, 0.0, intention_loss.size(1), device=intention_loss.device)  # (T)
+		time_weights = time_weights.view(1, -1)  # (1, T)
+
+		# 使用时间加权的损失
+		weighted_intention_loss = (intention_loss * time_weights).mean()
+
+		return weighted_intention_loss
+
 	
 	def _train_single_epoch(self, epoch):
 		
@@ -296,7 +340,7 @@ class Trainer:
 		for data in self.train_loader:
 			batch_size, traj_mask, past_traj, fut_traj = self.data_preprocess(data)
 
-			sample_prediction, mean_estimation, variance_estimation = self.model_initializer(past_traj, traj_mask)
+			sample_prediction, mean_estimation, variance_estimation, intention_estimation, angel_estimation = self.model_initializer(past_traj, traj_mask)
 			sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 			loc = sample_prediction + mean_estimation[:, None]
 			
@@ -312,12 +356,14 @@ class Trainer:
 									+ 
 								variance_estimation
 								).mean()
+			loss_intention = self.compute_intention_loss(intention_estimation) 
 
-			loss = loss_dist*50 + loss_uncertainty + loss_intention
+			loss = loss_dist*50 + loss_uncertainty + loss_intention*50
 			loss_total += loss.item()
 			loss_dt += loss_dist.item()*50
 			loss_dc += loss_uncertainty.item()
-
+			loss_intention += loss_intention.item()*50
+			
 
 			self.opt.zero_grad()
 			loss.backward()
@@ -327,7 +373,7 @@ class Trainer:
 			if self.cfg.debug and count == 2:
 				break
 
-		return loss_total/count, loss_dt/count, loss_dc/count
+		return loss_total/count, loss_dt/count, loss_dc/count, loss_intention/count
 
 
 	def _test_single_epoch(self):
@@ -345,7 +391,7 @@ class Trainer:
 			for data in self.test_loader:
 				batch_size, traj_mask, past_traj, fut_traj = self.data_preprocess(data)
 
-				sample_prediction, mean_estimation, variance_estimation = self.model_initializer(past_traj, traj_mask)
+				sample_prediction, mean_estimation, variance_estimation, intention_estimation, angel_estimation = self.model_initializer(past_traj, traj_mask)
 				sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 				loc = sample_prediction + mean_estimation[:, None]
 			
@@ -385,10 +431,11 @@ class Trainer:
 			for data in self.test_loader:
 				_, traj_mask, past_traj, _ = self.data_preprocess(data)
 
-				sample_prediction, mean_estimation, variance_estimation = self.model_initializer(past_traj, traj_mask)
+				sample_prediction, mean_estimation, variance_estimation, intention_estimation, angel_estimation = self.model_initializer(past_traj, traj_mask)
 				torch.save(sample_prediction, root_path+'p_var.pt')
 				torch.save(mean_estimation, root_path+'p_mean.pt')
 				torch.save(variance_estimation, root_path+'p_sigma.pt')
+				torch.save(intention_estimation, root_path+'p_intention.pt')
 
 				sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 				loc = sample_prediction + mean_estimation[:, None]
@@ -424,7 +471,7 @@ class Trainer:
 			for data in self.test_loader:
 				batch_size, traj_mask, past_traj, fut_traj = self.data_preprocess(data)
 
-				sample_prediction, mean_estimation, variance_estimation = self.model_initializer(past_traj, traj_mask)
+				sample_prediction, mean_estimation, variance_estimation, intention_estimation, angel_estimation = self.model_initializer(past_traj, traj_mask)
 				sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 				loc = sample_prediction + mean_estimation[:, None]
 			
