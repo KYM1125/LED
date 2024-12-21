@@ -282,6 +282,8 @@ class Trainer:
 		past_traj_abs = ((data['pre_motion_3D'].cuda() - self.traj_mean)/self.traj_scale).contiguous().view(-1, 10, 2)
 		past_traj_rel = ((data['pre_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 10, 2)
 		past_traj_vel = torch.cat((past_traj_rel[:, 1:] - past_traj_rel[:, :-1], torch.zeros_like(past_traj_rel[:, -1:])), dim=1)
+		# past_traj_vel = torch.cat((torch.zeros_like(past_traj_rel[:, :1]), 
+        #                    past_traj_rel[:, :-1] - past_traj_rel[:, 1:]), dim=1) # 反向差分，保留关键最后帧
 		past_traj = torch.cat((past_traj_abs, past_traj_rel, past_traj_vel), dim=-1)
 
 		fut_traj = ((data['fut_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 20, 2)
@@ -313,7 +315,7 @@ class Trainer:
 								variance_estimation
 								).mean()
 
-			loss = loss_dist*50 + loss_uncertainty + loss_intention
+			loss = loss_dist*50 + loss_uncertainty
 			loss_total += loss.item()
 			loss_dt += loss_dist.item()*50
 			loss_dc += loss_uncertainty.item()

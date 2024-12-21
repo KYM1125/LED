@@ -42,13 +42,15 @@ class VecIntInitializer(nn.Module):
 		x: batch size, t_p, 6
 		'''
 		# relative_features = self.calculate_relative_changes(x)
-		x_x = x[:, :, 0]
-		v_x = x[:, :, 2]
-		a_x = x[:, :, 4]
+		# x_x = x[:, :, 0]
+		# v_x = x[:, :, 2]
+		# a_x = x[:, :, 4]
 		# t = (x_x[:, :-1] - x_x[:, 1:]) / (v_x[:, :-1] + 1e-6)
-		angles, direction = self.calculate_acceleration_angle_with_direction(x[:,:,4], x[:,:,5])
-		signed_angles = angles * direction
+		# angles, direction = self.calculate_acceleration_angle_with_direction(x[:,:,4], x[:,:,5])
+		# signed_angles = angles * direction
 		# relative_angels, relative_direction = self.calculate_acceleration_angle_with_direction(relative_features[:,:,4], relative_features[:,:,5])
+		signed_angles = x[:, :, 6].unsqueeze(-1)
+		x = x[:, :, :6]
 		mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
 		social_embed = self.social_encoder(x, mask)
 		social_embed = social_embed.squeeze(1)
@@ -58,7 +60,7 @@ class VecIntInitializer(nn.Module):
 		ego_mean_embed = self.ego_mean_encoder(x)
 		ego_scale_embed = self.ego_scale_encoder(x)
 		ego_intention_embed = self.ego_intention_encoder(x)
-		ego_angel_embed = self.ego_angel_encoder(signed_angles.unsqueeze(-1))
+		ego_angel_embed = self.ego_angel_encoder(signed_angles)
 		
 		# B, 256
 		intention_total = torch.cat((ego_intention_embed, social_embed), dim=-1)

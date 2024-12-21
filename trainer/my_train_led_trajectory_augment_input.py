@@ -12,7 +12,9 @@ from utils.utils import print_log
 
 from torch.utils.data import DataLoader
 from data.dataloader_nba import NBADataset, seq_collate
-
+import matplotlib.pyplot as plt
+from IPython.display import Image, display
+from torch.utils.tensorboard import SummaryWriter
 
 from models.model_led_initializer import LEDInitializer as InitializationModel
 from models.model_diffusion import TransformerDenoisingModel as CoreDenoisingModel
@@ -20,6 +22,7 @@ from models.model_led_initializer_with_intention import VecIntInitializer as MyI
 
 import pdb
 NUM_Tau = 5
+writer = SummaryWriter(log_dir="runs/angle_comparison")
 
 class Trainer:
 	def __init__(self, config):
@@ -107,7 +110,39 @@ class Trainer:
 		trainable_num = sum(p.numel() for p in model.parameters() if p.requires_grad)
 		print_log("[{}] Trainable/Total: {}/{}".format(name, trainable_num, total_num), self.log)
 		return None
+	
+	def plot_angle_comparison_to_tensorboard(self, angel_estimation, target_angel, step, title='Angle Comparison'):
+		"""
+		绘制 angle_estimation 和 target_angel 的变化曲线，并将图像保存到 TensorBoard 中。
 
+		:param angel_estimation: 模型预测的角度 (B, T)
+		:param target_angel: 真实角度 (B, T)
+		:param step: 当前训练步骤，作为 TensorBoard 的全局步骤
+		:param title: 图表标题
+		"""
+		# 将角度从弧度转换为度数
+		angel_estimation_deg = torch.rad2deg(angel_estimation.detach()).cpu().numpy()  # 使用 detach()
+		target_angel_deg = torch.rad2deg(target_angel.detach()).cpu().numpy()  # 使用 detach()
+
+		# 设置画布
+		plt.figure(figsize=(10, 6))
+
+		# 绘制预测角度和真实角度
+		plt.plot(angel_estimation_deg[0], label='Predicted Angle', color='blue', linestyle='--')
+		plt.plot(target_angel_deg[0], label='True Angle', color='red', linestyle='-')
+
+		# 添加图例和标题
+		plt.legend()
+		plt.title(title)
+		plt.xlabel('Time Step')
+		plt.ylabel('Angle (degrees)')
+		plt.grid(True)
+
+		# 将图像写入 TensorBoard
+		writer.add_figure('Angle Comparison', plt.gcf(), global_step=step)
+
+		# 清理当前图形，以防影响后续绘图
+		plt.close()
 
 	def make_beta_schedule(self, schedule: str = 'linear', 
 			n_timesteps: int = 1000, 
@@ -245,13 +280,13 @@ class Trainer:
 	def fit(self):
 		# Training loop
 		for epoch in range(0, self.cfg.num_epochs):
-			loss_total, loss_distance, loss_uncertainty, loss_intention = self._train_single_epoch(epoch)
+			loss_total, loss_distance, loss_uncertainty, loss_intention, loss_angel = self._train_single_epoch(epoch)
 			# print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}'.format(
 			# 	time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
 			# 	epoch, loss_total, loss_distance, loss_uncertainty), self.log)
-			print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}\tLoss Intention: {:.6f}'.format(
+			print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}\tLoss Intention: {:.6f}\tLoss Angel: {:.6f}'.format(
 				time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
-				epoch, loss_total, loss_distance, loss_uncertainty, loss_intention), self.log)
+				epoch, loss_total, loss_distance, loss_uncertainty, loss_intention, loss_angel), self.log)
 			
 			if (epoch + 1) % self.cfg.test_interval == 0:
 				performance, samples = self._test_single_epoch()
@@ -287,12 +322,12 @@ class Trainer:
 		past_traj_abs = ((data['pre_motion_3D'].cuda() - self.traj_mean)/self.traj_scale).contiguous().view(-1, 10, 2)
 		past_traj_rel = ((data['pre_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 10, 2)
 		past_traj_vel = torch.cat((past_traj_rel[:, 1:] - past_traj_rel[:, :-1], torch.zeros_like(past_traj_rel[:, -1:])), dim=1)
-		past_traj_acc = torch.cat((past_traj_vel[:, 1:] - past_traj_vel[:, :-1], torch.zeros_like(past_traj_vel[:, -1:])), dim=1)
+		past_traj_acc = torch.cat((past_traj_vel[:, 1:] - past_traj_vel[:, :-1], torch.zeros_like(past_traj_vel[:, -1:])), dim=1) # 后一帧减去前一帧，得到加速度
 		past_traj_vel_angle = torch.atan2(past_traj_vel[..., 1], past_traj_vel[..., 0])
-		past_traj_acc_angle = torch.atan2(past_traj_acc[..., 1], past_traj_acc[..., 0])
+		past_traj_acc_angle = torch.atan2(past_traj_acc[..., 1], past_traj_acc[..., 0]) # 相对于x轴的逆时针夹角，单位为弧度。
 		velocity_angle_change = torch.diff(past_traj_vel_angle, dim=1, prepend=torch.zeros_like(past_traj_vel_angle[:, :1]))
-		acceleration_angle_change = torch.diff(past_traj_acc_angle, dim=1, prepend=torch.zeros_like(past_traj_acc_angle[:, :1]))
-		past_traj = torch.cat((past_traj_abs, past_traj_rel, past_traj_vel), dim=-1)
+		acceleration_angle_change = torch.diff(past_traj_acc_angle, dim=1, prepend=torch.zeros_like(past_traj_acc_angle[:, :1])).unsqueeze(-1) # 当前帧减去上一帧
+		past_traj = torch.cat((past_traj_abs, past_traj_rel, past_traj_vel, acceleration_angle_change), dim=-1)
 
 		fut_traj_abs = ((data['fut_motion_3D'].cuda() - self.traj_mean)/self.traj_scale).contiguous().view(-1, 20, 2)
 		fut_traj_rel = ((data['fut_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 20, 2)
@@ -301,9 +336,10 @@ class Trainer:
 		fut_traj_vel_angle = torch.atan2(fut_traj_vel[..., 1], fut_traj_vel[..., 0])
 		fut_traj_acc_angle = torch.atan2(fut_traj_acc[..., 1], fut_traj_acc[..., 0])
 		velocity_angle_change_fut = torch.diff(fut_traj_vel_angle, dim=1, prepend=torch.zeros_like(fut_traj_vel_angle[:, :1]))
-		acceleration_angle_change_fut = torch.diff(fut_traj_acc_angle, dim=1, prepend=torch.zeros_like(fut_traj_acc_angle[:, :1]))
+		acceleration_angle_change_fut = torch.diff(fut_traj_acc_angle, dim=1, prepend=torch.zeros_like(fut_traj_acc_angle[:, :1])).unsqueeze(-1)
 
-		fut_traj = ((data['fut_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 20, 2)
+		# fut_traj = ((data['fut_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 20, 2)
+		fut_traj = torch.cat((fut_traj_rel, acceleration_angle_change_fut), dim=-1)
 		return batch_size, traj_mask, past_traj, fut_traj
 
 	def compute_intention_loss(self, intention_estimation):
@@ -329,40 +365,58 @@ class Trainer:
 		weighted_intention_loss = (intention_loss * time_weights).mean()
 
 		return weighted_intention_loss
-
+	
+	def compute_angle_cosine_loss(self, angel_estimation, target_angel):
+		"""
+		计算预测的角度与目标角度之间的余弦相似度损失。
+		:param angel_estimation: 模型预测的角度 (B, T)
+		:param target_angel: 真实角度 (B, T)
+		:return: 余弦相似度损失
+		"""
+		# 计算角度的cosine相似度
+		cos_sim = torch.cos(angel_estimation - target_angel)
+		# 余弦相似度越高，说明预测和目标越接近，反之亦然
+		cosine_loss = torch.mean(1 - cos_sim)  # 使用1减去余弦相似度来表示损失 
+		return cosine_loss
 	
 	def _train_single_epoch(self, epoch):
 		
 		self.model.train()
 		self.model_initializer.train()
-		loss_total, loss_dt, loss_dc, count = 0, 0, 0, 0
+		loss_total, loss_dt, loss_dc, loss_it, loss_ag, count = 0, 0, 0, 0, 0, 0
 		
 		for data in self.train_loader:
 			batch_size, traj_mask, past_traj, fut_traj = self.data_preprocess(data)
+			fut_traj_xy = fut_traj[..., :2]
+			target_angel = fut_traj[..., 2]
+			past_traj_movement = past_traj[..., :6]
 
 			sample_prediction, mean_estimation, variance_estimation, intention_estimation, angel_estimation = self.model_initializer(past_traj, traj_mask)
 			sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 			loc = sample_prediction + mean_estimation[:, None]
+			self.plot_angle_comparison_to_tensorboard(angel_estimation, target_angel, epoch)
+			generated_y = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, loc)
 			
-			generated_y = self.p_sample_loop_accelerate(past_traj, traj_mask, loc)
-			
-			loss_dist = (	(generated_y - fut_traj.unsqueeze(dim=1)).norm(p=2, dim=-1) 
+			loss_dist = (	(generated_y - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1) 
 								* 
 							 self.temporal_reweight
 						).mean(dim=-1).min(dim=1)[0].mean()
 			loss_uncertainty = (torch.exp(-variance_estimation)
 		       						*
-								(generated_y - fut_traj.unsqueeze(dim=1)).norm(p=2, dim=-1).mean(dim=(1, 2)) 
+								(generated_y - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1).mean(dim=(1, 2)) 
 									+ 
 								variance_estimation
 								).mean()
 			loss_intention = self.compute_intention_loss(intention_estimation) 
+			loss_angel = self.compute_angle_cosine_loss(angel_estimation.squeeze(-1), target_angel)
 
-			loss = loss_dist*50 + loss_uncertainty + loss_intention*50
+			loss = loss_dist*50 + loss_uncertainty + loss_intention*5 + loss_angel*5
 			loss_total += loss.item()
 			loss_dt += loss_dist.item()*50
 			loss_dc += loss_uncertainty.item()
-			loss_intention += loss_intention.item()*50
+			loss_it += loss_intention.item()*10
+			loss_ag += loss_angel.item()*5
+
 			
 
 			self.opt.zero_grad()
@@ -373,7 +427,7 @@ class Trainer:
 			if self.cfg.debug and count == 2:
 				break
 
-		return loss_total/count, loss_dt/count, loss_dc/count, loss_intention/count
+		return loss_total/count, loss_dt/count, loss_dc/count, loss_it/count, loss_ag/count
 
 
 	def _test_single_epoch(self):
@@ -390,16 +444,19 @@ class Trainer:
 		with torch.no_grad():
 			for data in self.test_loader:
 				batch_size, traj_mask, past_traj, fut_traj = self.data_preprocess(data)
+				fut_traj_xy = fut_traj[..., :2]
+				target_angel = fut_traj[..., 2]
+				past_traj_movement = past_traj[..., :6]
 
 				sample_prediction, mean_estimation, variance_estimation, intention_estimation, angel_estimation = self.model_initializer(past_traj, traj_mask)
 				sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 				loc = sample_prediction + mean_estimation[:, None]
 			
-				pred_traj = self.p_sample_loop_accelerate(past_traj, traj_mask, loc)
+				pred_traj = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, loc)
 
-				fut_traj = fut_traj.unsqueeze(1).repeat(1, 20, 1, 1)
+				fut_traj_xy = fut_traj_xy.unsqueeze(1).repeat(1, 20, 1, 1)
 				# b*n, K, T, 2
-				distances = torch.norm(fut_traj - pred_traj, dim=-1) * self.traj_scale
+				distances = torch.norm(fut_traj_xy - pred_traj, dim=-1) * self.traj_scale
 				for time_i in range(1, 5):
 					ade = (distances[:, :, :5*time_i]).mean(dim=-1).min(dim=-1)[0].sum()
 					fde = (distances[:, :, 5*time_i-1]).min(dim=-1)[0].sum()
@@ -430,6 +487,8 @@ class Trainer:
 		with torch.no_grad():
 			for data in self.test_loader:
 				_, traj_mask, past_traj, _ = self.data_preprocess(data)
+				
+				past_traj_movement = past_traj[..., :6]
 
 				sample_prediction, mean_estimation, variance_estimation, intention_estimation, angel_estimation = self.model_initializer(past_traj, traj_mask)
 				torch.save(sample_prediction, root_path+'p_var.pt')
@@ -440,8 +499,8 @@ class Trainer:
 				sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 				loc = sample_prediction + mean_estimation[:, None]
 
-				pred_traj = self.p_sample_loop_accelerate(past_traj, traj_mask, loc)
-				pred_mean = self.p_sample_loop_mean(past_traj, traj_mask, mean_estimation)
+				pred_traj = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, loc)
+				pred_mean = self.p_sample_loop_mean(past_traj_movement, traj_mask, mean_estimation)
 
 				torch.save(data['pre_motion_3D'], root_path+'past.pt')
 				torch.save(data['fut_motion_3D'], root_path+'future.pt')
@@ -470,16 +529,18 @@ class Trainer:
 		with torch.no_grad():
 			for data in self.test_loader:
 				batch_size, traj_mask, past_traj, fut_traj = self.data_preprocess(data)
+				fut_traj_xy = fut_traj[..., :2]
+				past_traj_movement = past_traj[..., :6]
 
 				sample_prediction, mean_estimation, variance_estimation, intention_estimation, angel_estimation = self.model_initializer(past_traj, traj_mask)
 				sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 				loc = sample_prediction + mean_estimation[:, None]
 			
-				pred_traj = self.p_sample_loop_accelerate(past_traj, traj_mask, loc)
+				pred_traj = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, loc)
 
-				fut_traj = fut_traj.unsqueeze(1).repeat(1, 20, 1, 1)
+				fut_traj_xy = fut_traj_xy.unsqueeze(1).repeat(1, 20, 1, 1)
 				# b*n, K, T, 2
-				distances = torch.norm(fut_traj - pred_traj, dim=-1) * self.traj_scale
+				distances = torch.norm(fut_traj_xy - pred_traj, dim=-1) * self.traj_scale
 				for time_i in range(1, 5):
 					ade = (distances[:, :, :5*time_i]).mean(dim=-1).min(dim=-1)[0].sum()
 					fde = (distances[:, :, 5*time_i-1]).min(dim=-1)[0].sum()
