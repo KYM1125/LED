@@ -129,6 +129,25 @@ class social_transformer(nn.Module):
 
 		return h_feat
 
+class intention_social_transformer(nn.Module):
+	def __init__(self, past_len):
+		super(intention_social_transformer, self).__init__()
+		self.encode_past = nn.Linear(past_len*9, 256, bias=False)
+		self.layer = nn.TransformerEncoderLayer(d_model=256, nhead=2, dim_feedforward=256)
+		self.transformer_encoder = nn.TransformerEncoder(self.layer, num_layers=2)
+
+	def forward(self, h, mask):
+		'''
+		h: batch_size, t, 2
+		'''
+		h_feat = self.encode_past(h.reshape(h.size(0), -1)).unsqueeze(1)
+		# print(h_feat.shape)
+		# n_samples, 1, 64
+		h_feat_ = self.transformer_encoder(h_feat, mask)
+		h_feat = h_feat + h_feat_
+
+		return h_feat
+
 
 class st_encoder(nn.Module):
 	def __init__(self):
@@ -171,6 +190,43 @@ class angel_encoder(nn.Module):
 	def __init__(self):
 		super().__init__()
 		channel_in = 1
+		channel_out = 32
+		dim_kernel = 3
+		self.dim_embedding_key = 256
+		self.spatial_conv = nn.Conv1d(channel_in, channel_out, dim_kernel, stride=1, padding=1)
+		self.temporal_encoder = nn.GRU(channel_out, self.dim_embedding_key, 1, batch_first=True)
+
+		self.relu = nn.ReLU()
+
+		self.reset_parameters()
+
+	def reset_parameters(self):
+		nn.init.kaiming_normal_(self.spatial_conv.weight)
+		nn.init.kaiming_normal_(self.temporal_encoder.weight_ih_l0)
+		nn.init.kaiming_normal_(self.temporal_encoder.weight_hh_l0)
+		nn.init.zeros_(self.spatial_conv.bias)
+		nn.init.zeros_(self.temporal_encoder.bias_ih_l0)
+		nn.init.zeros_(self.temporal_encoder.bias_hh_l0)
+
+	def forward(self, X):
+		'''
+		X: b, T, 2
+
+		return: b, F
+		'''
+		X_t = torch.transpose(X, 1, 2)
+		X_after_spatial = self.relu(self.spatial_conv(X_t))
+		X_embed = torch.transpose(X_after_spatial, 1, 2)
+
+		output_x, state_x = self.temporal_encoder(X_embed)
+		state_x = state_x.squeeze(0)
+
+		return state_x
+	
+class intention_encoder(nn.Module):
+	def __init__(self):
+		super().__init__()
+		channel_in = 9
 		channel_out = 32
 		dim_kernel = 3
 		self.dim_embedding_key = 256

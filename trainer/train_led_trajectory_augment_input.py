@@ -12,7 +12,7 @@ from utils.utils import print_log
 
 from torch.utils.data import DataLoader
 from data.dataloader_nba import NBADataset, seq_collate
-
+import torch.distributions as dist
 
 from models.model_led_initializer import LEDInitializer as InitializationModel
 from models.model_diffusion import TransformerDenoisingModel as CoreDenoisingModel
@@ -260,6 +260,37 @@ class Trainer:
 				torch.save(model_cp, cp_path)
 			self.scheduler_model.step()
 
+	def estimate_last_velocity(self, past_traj_rel):
+		"""
+		使用贝叶斯方法推断最后一帧的速度。
+		
+		:param past_traj_rel: (B, T, 2) 的位置数据
+		:return: last_velocity: (B, 1, 2) 的速度估计
+		"""
+		# 计算速度 (B, T-1, 2)
+		past_traj_vel = past_traj_rel[:, 1:] - past_traj_rel[:, :-1]
+		
+		# 假设先验速度分布（根据历史均值和方差）
+		mean_velocity = past_traj_vel.mean(dim=1, keepdim=True)  # 均值作为先验均值
+		velocity_std = past_traj_vel.std(dim=1, keepdim=True)  # 方差作为先验标准差
+
+		prior = dist.Normal(mean_velocity, velocity_std + 1e-5)  # 防止除零
+
+		# 观测（根据最近几帧的速度变化趋势）
+		recent_velocity = past_traj_vel[:, -2:]  # 倒数两帧的速度
+		observed_trend = recent_velocity.mean(dim=1, keepdim=True)  # 平均趋势
+
+		likelihood = dist.Normal(observed_trend, velocity_std + 1e-5)
+
+		# 贝叶斯后验：权衡先验与观测
+		posterior_mean = (prior.mean + likelihood.mean) / 2
+		posterior_std = (prior.stddev + likelihood.stddev) / 2
+
+		posterior = dist.Normal(posterior_mean, posterior_std)
+
+		# 最终速度估计（采样或使用均值）
+		last_velocity = posterior.sample()  # 或者使用 posterior.mean
+		return last_velocity.unsqueeze(1)  # (B, 1, 2)
 
 	def data_preprocess(self, data):
 		"""
@@ -281,9 +312,13 @@ class Trainer:
 		# augment input: absolute position, relative position, velocity
 		past_traj_abs = ((data['pre_motion_3D'].cuda() - self.traj_mean)/self.traj_scale).contiguous().view(-1, 10, 2)
 		past_traj_rel = ((data['pre_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 10, 2)
+		# last_velocity = self.estimate_last_velocity(past_traj_rel)
+		# past_traj_vel = torch.cat((past_traj_rel[:, 1:] - past_traj_rel[:, :-1], last_velocity.squeeze(1)), dim=1)
+		# past_traj_vel_forward = torch.cat((past_traj_rel[:, 1:] - past_traj_rel[:, :-1], torch.zeros_like(past_traj_rel[:, :1])), dim=1)
+		# past_traj_vel_reverse = torch.cat((torch.zeros_like(past_traj_rel[:, :1]), past_traj_rel[:, :-1] - past_traj_rel[:, 1:]), dim=1)
+		# past_traj_vel_corrected = -past_traj_vel_reverse
+
 		past_traj_vel = torch.cat((past_traj_rel[:, 1:] - past_traj_rel[:, :-1], torch.zeros_like(past_traj_rel[:, -1:])), dim=1)
-		# past_traj_vel = torch.cat((torch.zeros_like(past_traj_rel[:, :1]), 
-        #                    past_traj_rel[:, :-1] - past_traj_rel[:, 1:]), dim=1) # 反向差分，保留关键最后帧
 		past_traj = torch.cat((past_traj_abs, past_traj_rel, past_traj_vel), dim=-1)
 
 		fut_traj = ((data['fut_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 20, 2)

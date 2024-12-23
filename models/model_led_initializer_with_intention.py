@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from models.layers import MLP, social_transformer, st_encoder, angel_encoder
+from models.layers import MLP, social_transformer, st_encoder, angel_encoder, intention_social_transformer, intention_encoder
 from scipy.spatial.transform import Rotation as R
 
 class VecIntInitializer(nn.Module):
@@ -19,13 +19,16 @@ class VecIntInitializer(nn.Module):
 		self.n = k_pred
 		self.input_dim = t_h * d_h
 		self.output_dim = t_f * d_f * k_pred
+		self.intention_dim = t_f * 3 * k_pred
+		self.angel_dim = t_f * 1 * k_pred
 		self.fut_len = t_f
 
 		self.social_encoder = social_transformer(t_h)
+		self.intention_social_encoder = intention_social_transformer(t_h)
 		self.ego_var_encoder = st_encoder()
 		self.ego_mean_encoder = st_encoder()
 		self.ego_scale_encoder = st_encoder()
-		self.ego_intention_encoder = st_encoder()
+		self.ego_intention_encoder = intention_encoder()
 		self.ego_angel_encoder = angel_encoder()
 
 		self.scale_encoder = MLP(1, 32, hid_feat=(4, 16), activation=nn.ReLU())
@@ -33,55 +36,46 @@ class VecIntInitializer(nn.Module):
 		self.var_decoder = MLP(256*2+32, self.output_dim, hid_feat=(1024, 1024), activation=nn.ReLU())
 		self.mean_decoder = MLP(256*2, t_f * d_f, hid_feat=(256, 128), activation=nn.ReLU())
 		self.scale_decoder = MLP(256*2, 1, hid_feat=(256, 128), activation=nn.ReLU())
-		self.intention_decoder = MLP(256*2, t_f * 3, hid_feat=(256, 128), activation=nn.ReLU())
-		self.angel_decoder = MLP(256*2, t_f * 1, hid_feat=(256, 128), activation=nn.ReLU())
+		self.intention_decoder = MLP(256*2, self.intention_dim, hid_feat=(256, 128), activation=nn.ReLU())
+		self.angel_decoder = MLP(256*2, self.angel_dim, hid_feat=(256, 128), activation=nn.ReLU())
 
 	
-	def forward(self, x, mask=None):
+	def forward(self, x, intention, mask=None):
 		'''
-		x: batch size, t_p, 6
+			x: batch size, t_p, 6
+			intention: batch size, t_p, 3
 		'''
-		# relative_features = self.calculate_relative_changes(x)
-		# x_x = x[:, :, 0]
-		# v_x = x[:, :, 2]
-		# a_x = x[:, :, 4]
-		# t = (x_x[:, :-1] - x_x[:, 1:]) / (v_x[:, :-1] + 1e-6)
-		# angles, direction = self.calculate_acceleration_angle_with_direction(x[:,:,4], x[:,:,5])
-		# signed_angles = angles * direction
-		# relative_angels, relative_direction = self.calculate_acceleration_angle_with_direction(relative_features[:,:,4], relative_features[:,:,5])
+
 		signed_angles = x[:, :, 6].unsqueeze(-1)
 		x = x[:, :, :6]
 		mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
 		social_embed = self.social_encoder(x, mask)
 		social_embed = social_embed.squeeze(1)
+		intention_social_embed = self.intention_social_encoder(intention, mask)
+		intention_social_embed = intention_social_embed.squeeze(1)
 		# B, 256
 		
 		ego_var_embed = self.ego_var_encoder(x)
 		ego_mean_embed = self.ego_mean_encoder(x)
 		ego_scale_embed = self.ego_scale_encoder(x)
-		ego_intention_embed = self.ego_intention_encoder(x)
+		ego_intention_embed = self.ego_intention_encoder(intention)
 		ego_angel_embed = self.ego_angel_encoder(signed_angles)
 		
 		# B, 256
-		intention_total = torch.cat((ego_intention_embed, social_embed), dim=-1)
-		guess_intention = self.intention_decoder(intention_total).contiguous().view(-1, self.fut_len, 3) # B, T, 3
+		intention_total = torch.cat((ego_intention_embed, intention_social_embed), dim=-1)
+		guess_intention = self.intention_decoder(intention_total).reshape(x.size(0), self.n, self.fut_len, 3) # B, T, 3
 		
 		angel_total = torch.cat((ego_angel_embed, social_embed), dim=-1)
-		guess_angel = self.angel_decoder(angel_total).contiguous().view(-1, self.fut_len, 1) # B, T, 1
+		guess_angel = self.angel_decoder(angel_total).reshape(x.size(0), self.n, self.fut_len, 1) # B, T, 1
 
 		mean_total = torch.cat((ego_mean_embed, social_embed), dim=-1)
 		guess_mean = self.mean_decoder(mean_total).contiguous().view(-1, self.fut_len, 2) # B, T, 2
 		
-		guess_mean_x_3d = torch.stack((guess_mean[:,:,0], torch.zeros_like(guess_mean[:,:,0]), torch.zeros_like(guess_mean[:,:,0])), dim=-1)  # Shape: [22, 20, 3]
-		guess_mean_y_3d = torch.stack((torch.zeros_like(guess_mean[:,:,1]), guess_mean[:,:,1], torch.zeros_like(guess_mean[:,:,1])), dim=-1)  # Shape: [22, 20, 3]
-		# rotated_x = torch.cross(guess_action, guess_mean_x_3d, dim=-1) # guess_intention应该乘以t的平方并除以2，x = x0 + v0*t + 1/2*a*t^2
-		# rotated_y = torch.cross(guess_action, guess_mean_y_3d, dim=-1)
+		# guess_mean_x_3d = torch.stack((guess_mean[:,:,0], torch.zeros_like(guess_mean[:,:,0]), torch.zeros_like(guess_mean[:,:,0])), dim=-1)  # Shape: [22, 20, 3]
+		# guess_mean_y_3d = torch.stack((torch.zeros_like(guess_mean[:,:,1]), guess_mean[:,:,1], torch.zeros_like(guess_mean[:,:,1])), dim=-1)  # Shape: [22, 20, 3]
+		# rotated_x, rotated_y = self.rotate_vectors(guess_intention, guess_angel, guess_mean_x_3d, guess_mean_y_3d)
 		# guess_mean_rotated = guess_mean.clone()
-		# guess_mean_rotated[:, :, 0] = rotated_x[:, :, 1] 
-		# guess_mean_rotated[:, :, 1] = rotated_y[:, :, 0]
-		rotated_x, rotated_y = self.rotate_vectors(guess_intention, guess_angel, guess_mean_x_3d, guess_mean_y_3d)
-		guess_mean_rotated = guess_mean.clone()
-		guess_mean_rotated = (rotated_x + rotated_y)[:, :, :2]
+		# guess_mean_rotated = (rotated_x + rotated_y)[:, :, :2]
 		
 		scale_total = torch.cat((ego_scale_embed, social_embed), dim=-1)
 		guess_scale = self.scale_decoder(scale_total) # B, 1
@@ -89,8 +83,13 @@ class VecIntInitializer(nn.Module):
 		guess_scale_feat = self.scale_encoder(guess_scale) 
 		var_total = torch.cat((ego_var_embed, social_embed, guess_scale_feat), dim=-1) 
 		guess_var = self.var_decoder(var_total).reshape(x.size(0), self.n, self.fut_len, 2) # B, K, T, 2
+		guess_var_x_3d = torch.stack((guess_var[:,:, :, 0], torch.zeros_like(guess_var[:,:, :, 0]), torch.zeros_like(guess_var[:,:, :, 0])), dim=-1)  # Shape: [22, 20, 20, 3]
+		guess_var_y_3d = torch.stack((torch.zeros_like(guess_var[:,:, :, 1]), guess_var[:,:, :, 1], torch.zeros_like(guess_var[:,:, :, 1])), dim=-1)  # Shape: [22, 20, 20, 3]
+		rotated_var_x, rotated_var_y = self.rotate_vectors(guess_intention, guess_angel, guess_var_x_3d, guess_var_y_3d)
+		guess_var_rotated = guess_var.clone()
+		guess_var_rotated = (rotated_var_x + rotated_var_y)[:, :, :, :2] # 投影
 
-		return guess_var, guess_mean_rotated, guess_scale, guess_intention, guess_angel
+		return guess_var_rotated, guess_mean, guess_scale, guess_intention, guess_angel
 	
 	def calculate_relative_changes(self, x):
 		"""
@@ -171,7 +170,7 @@ class VecIntInitializer(nn.Module):
 		
 		return angles, direction
 	
-	def rotate_vectors(self, guess_intention, guess_angel, guess_mean_x_3d, guess_mean_y_3d):
+	def rotate_vectors(self, guess_intention, guess_angel, guess_x_3d, guess_y_3d):
 		# 创建旋转四元数
 		device = guess_intention.device
 		normalized_guess_intention = guess_intention / guess_intention.norm(dim=-1, keepdim=True)
@@ -183,12 +182,12 @@ class VecIntInitializer(nn.Module):
 		r = R.from_rotvec(rotvec)
 
 		# 应用旋转，得到旋转后的向量
-		rotated_x = r.apply(guess_mean_x_3d.detach().cpu().numpy().reshape(-1, 3))  # 示例：旋转guess_mean_x_3d
-		rotated_y = r.apply(guess_mean_y_3d.detach().cpu().numpy().reshape(-1, 3))  # 旋转guess_mean_y_3d
+		rotated_x = r.apply(guess_x_3d.detach().cpu().numpy().reshape(-1, 3))  # 示例：旋转guess_mean_x_3d
+		rotated_y = r.apply(guess_y_3d.detach().cpu().numpy().reshape(-1, 3))  # 旋转guess_mean_y_3d
 
 		# 将旋转结果调整回原始形状
-		rotated_x = rotated_x.reshape(guess_mean_x_3d.shape)
-		rotated_y = rotated_y.reshape(guess_mean_y_3d.shape)
+		rotated_x = rotated_x.reshape(guess_x_3d.shape)
+		rotated_y = rotated_y.reshape(guess_y_3d.shape)
 
 		# 将旋转后的向量转换回torch张量，并确保它们在正确的设备上
 		rotated_x = torch.tensor(rotated_x, device=device)
