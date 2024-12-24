@@ -86,7 +86,11 @@ class TransformerDenoisingModel(Module):
 		self.linear = ConcatSquashLinear(context_dim//2, 2, context_dim+3)
 
 
-	def forward(self, x, beta, context, mask):# 函数未调用
+	def forward(self, x, beta, context, mask):
+		'''
+			调用样式：self.model(y, beta, x, mask)
+			所以x是未来轨迹，beta是噪声强度，context是语义信息（社交信息或过去轨迹），mask是掩码
+		'''
 		batch_size = x.size(0)
 		beta = beta.view(batch_size, 1, 1)          # (B, 1, 1)
 		mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
