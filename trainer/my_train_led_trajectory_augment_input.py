@@ -23,6 +23,8 @@ from models.model_led_initializer_with_intention import VecIntInitializer as MyI
 import pdb
 NUM_Tau = 5
 writer = SummaryWriter(log_dir="runs/angle_comparison")
+writer_loss = SummaryWriter(log_dir='runs/loss')
+
 
 class Trainer:
 	def __init__(self, config):
@@ -280,13 +282,13 @@ class Trainer:
 	def fit(self):
 		# Training loop
 		for epoch in range(0, self.cfg.num_epochs):
-			loss_total, loss_distance, loss_uncertainty, loss_intention, loss_angel = self._train_single_epoch(epoch)
+			loss_total, loss_distance, loss_uncertainty, loss_intention, loss_simility = self._train_single_epoch(epoch)
 			# print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}'.format(
 			# 	time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
 			# 	epoch, loss_total, loss_distance, loss_uncertainty), self.log)
-			print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}\tLoss Intention: {:.6f}\tLoss Angel: {:.6f}'.format(
+			print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}\tLoss Intention: {:.6f}\tLoss Simility: {:.6f}'.format(
 				time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
-				epoch, loss_total, loss_distance, loss_uncertainty, loss_intention, loss_angel), self.log)
+				epoch, loss_total, loss_distance, loss_uncertainty, loss_intention, loss_simility), self.log)
 			
 			if (epoch + 1) % self.cfg.test_interval == 0:
 				performance, samples = self._test_single_epoch()
@@ -335,8 +337,16 @@ class Trainer:
 		past_traj_abs_3d = torch.cat((past_traj_abs, torch.zeros_like(past_traj_abs[..., :1])), dim=-1)
 		past_traj_rel_3d = torch.cat((past_traj_rel, torch.zeros_like(past_traj_rel[..., :1])), dim=-1)
 		past_traj_vel_3d = torch.cat((past_traj_vel, torch.zeros_like(past_traj_vel[..., :1])), dim=-1)
+
+		past_traj_similarity_abs = torch.sum(past_traj_abs_3d[:, :-1] * past_traj_abs_3d[:, 1:], dim=-1)
+		past_traj_similarity_rel = torch.sum(past_traj_rel_3d[:, :-1] * past_traj_rel_3d[:, 1:], dim=-1)
+		past_traj_similarity_vel = torch.sum(past_traj_vel_3d[:, :-1] * past_traj_vel_3d[:, 1:], dim=-1)
+		past_traj_similarity_abs = torch.cat((past_traj_similarity_abs, torch.zeros_like(past_traj_similarity_abs[:, -1:])), dim=1).unsqueeze(-1)
+		past_traj_similarity_rel = torch.cat((past_traj_similarity_rel, torch.zeros_like(past_traj_similarity_rel[:, -1:])), dim=1).unsqueeze(-1)
+		past_traj_similarity_vel = torch.cat((past_traj_similarity_vel, torch.zeros_like(past_traj_similarity_vel[:, -1:])), dim=1).unsqueeze(-1)
+
 		
-		past_traj_intention_abs = torch.cross(past_traj_abs_3d[:, :-1], past_traj_abs_3d[:, 1:], dim=-1) 
+		past_traj_intention_abs = torch.cross(past_traj_abs_3d[:, :-1], past_traj_abs_3d[:, 1:], dim=-1) # 当前帧叉乘下一帧
 		past_traj_intention = torch.cross(past_traj_rel_3d[:, :-1], past_traj_rel_3d[:, 1:], dim=-1) 
 		past_traj_intention_vel = torch.cross(past_traj_vel_3d[:, :-1], past_traj_vel_3d[:, 1:], dim=-1)
 		past_traj_intention_abs = torch.cat((past_traj_intention_abs, torch.zeros_like(past_traj_intention_abs[:, -1:, :])), dim=1)
@@ -344,6 +354,7 @@ class Trainer:
 		past_traj_intention_vel = torch.cat((past_traj_intention_vel, torch.zeros_like(past_traj_intention_vel[:, -1:, :])), dim=1)
 
 		past_traj = torch.cat((past_traj_abs, past_traj_rel, past_traj_vel, position_angle_change), dim=-1)
+		past_similarity = torch.cat((past_traj_similarity_abs, past_traj_similarity_rel, past_traj_similarity_vel), dim=-1)
 		past_intention = torch.cat((past_traj_intention_abs, past_traj_intention, past_traj_intention_vel), dim=-1)
 
 		fut_traj_abs = ((data['fut_motion_3D'].cuda() - self.traj_mean)/self.traj_scale).contiguous().view(-1, 20, 2)
@@ -360,11 +371,13 @@ class Trainer:
 		acceleration_angle_change_fut = torch.cat((fut_traj_acc_angle[:, 1:] - fut_traj_acc_angle[:, :-1], torch.zeros_like(fut_traj_acc_angle[:, -1:])), dim=1).unsqueeze(-1)
 		
 		fut_traj_rel_3d = torch.cat((fut_traj_rel, torch.zeros_like(fut_traj_rel[..., :1])), dim=-1)
+		fut_similarity = torch.sum(fut_traj_rel_3d[:, :-1] * fut_traj_rel_3d[:, 1:], dim=-1).unsqueeze(-1) # 当前帧点乘下一帧
+		fut_similarity = torch.cat((fut_similarity, torch.zeros_like(fut_similarity[:, -1:, :])), dim=1)
 		fut_intention = torch.cross(fut_traj_rel_3d[:, :-1], fut_traj_rel_3d[:, 1:], dim=-1) # 当前帧叉乘下一帧
 		fut_intention = torch.cat((fut_intention, torch.zeros_like(fut_intention[:, -1:, :])), dim=1)
 		
-		fut_traj = torch.cat((fut_traj_rel, position_angle_change_fut, fut_intention), dim=-1)
-		return batch_size, traj_mask, past_traj, fut_traj, past_intention
+		fut_traj = torch.cat((fut_traj_rel, fut_similarity, fut_intention), dim=-1)
+		return batch_size, traj_mask, past_traj, fut_traj, past_intention, past_similarity,
 
 	def compute_intention_loss(self, intention_estimation, target_intention):
 		"""
@@ -418,16 +431,17 @@ class Trainer:
 		
 		self.model.train()
 		self.model_initializer.train()
-		loss_total, loss_dt, loss_dc, loss_it, loss_ag, count = 0, 0, 0, 0, 0, 0
+		loss_total, loss_dt, loss_dc, loss_it, loss_sm, count = 0, 0, 0, 0, 0, 0
 		
-		for data in self.train_loader:
-			batch_size, traj_mask, past_traj, fut_traj, past_intention = self.data_preprocess(data)
+		# for data in self.train_loader:
+		for batch_idx, (data) in enumerate(self.train_loader):
+			batch_size, traj_mask, past_traj, fut_traj, past_intention, past_similarity = self.data_preprocess(data)
 			fut_traj_xy = fut_traj[..., :2]
-			target_angel = fut_traj[..., 2]
+			target_similarity = fut_traj[..., 2].unsqueeze(-1)
 			target_intention = fut_traj[..., 3:6]
 			past_traj_movement = past_traj[..., :6]
 
-			sample_prediction, mean_estimation, variance_estimation, intention_estimation, angel_estimation = self.model_initializer(past_traj, past_intention, traj_mask)
+			sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation = self.model_initializer(past_traj, past_intention, past_similarity, traj_mask)
 			sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 			loc = sample_prediction + mean_estimation[:, None]
 			# self.plot_angle_comparison_to_tensorboard(angel_estimation, target_angel, epoch)
@@ -444,14 +458,29 @@ class Trainer:
 								variance_estimation
 								).mean()
 			loss_intention = self.compute_intention_loss(intention_estimation, target_intention) 
-			loss_angel = self.compute_angle_cosine_loss(angel_estimation.squeeze(-1), target_angel)
+			# loss_angel = self.compute_angle_cosine_loss(angel_estimation.squeeze(-1), target_angel)
+			# 平均化M维度
+			similarity_estimation_avg = similarity_estimation.mean(dim=1)  # (B, T, 1)
 
-			loss = loss_dist*50 + loss_uncertainty + loss_intention*10 + loss_angel*100
+			# 计算L1损失
+			loss_similarity = ( 
+				torch.abs(similarity_estimation_avg - target_similarity) * self.temporal_reweight
+			).mean(dim=-1).min(dim=1)[0].mean()
+
+
+			loss = loss_dist*50 + loss_uncertainty + loss_intention*10 + loss_similarity*10
 			loss_total += loss.item()
 			loss_dt += loss_dist.item()*50
 			loss_dc += loss_uncertainty.item()
 			loss_it += loss_intention.item()*10
-			loss_ag += loss_angel.item()*100
+			loss_sm += loss_similarity.item()*10
+
+			# 记录每个batch的损失到TensorBoard
+			writer_loss.add_scalar('Loss/train_total', loss_total, epoch * len(self.train_loader) + batch_idx)
+			writer_loss.add_scalar('Loss/train_dist', loss_dt, epoch * len(self.train_loader) + batch_idx)
+			writer_loss.add_scalar('Loss/train_uncertainty', loss_dc, epoch * len(self.train_loader) + batch_idx)
+			writer_loss.add_scalar('Loss/train_intention', loss_it, epoch * len(self.train_loader) + batch_idx)
+			writer_loss.add_scalar('Loss/train_simularity', loss_sm, epoch * len(self.train_loader) + batch_idx)
 
 			self.opt.zero_grad()
 			loss.backward()
@@ -461,7 +490,7 @@ class Trainer:
 			if self.cfg.debug and count == 2:
 				break
 
-		return loss_total/count, loss_dt/count, loss_dc/count, loss_it/count, loss_ag/count
+		return loss_total/count, loss_dt/count, loss_dc/count, loss_it/count, loss_sm/count
 
 
 	def _test_single_epoch(self):
@@ -477,12 +506,12 @@ class Trainer:
 		count = 0
 		with torch.no_grad():
 			for data in self.test_loader:
-				batch_size, traj_mask, past_traj, fut_traj, past_intention = self.data_preprocess(data)
+				batch_size, traj_mask, past_traj, fut_traj, past_intention, past_similarity = self.data_preprocess(data)
 				fut_traj_xy = fut_traj[..., :2]
 				target_angel = fut_traj[..., 2]
 				past_traj_movement = past_traj[..., :6]
 
-				sample_prediction, mean_estimation, variance_estimation, intention_estimation, angel_estimation = self.model_initializer(past_traj, past_intention, traj_mask)
+				sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation = self.model_initializer(past_traj, past_intention, past_similarity, traj_mask)
 				sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 				loc = sample_prediction + mean_estimation[:, None]
 			
@@ -520,11 +549,11 @@ class Trainer:
 				
 		with torch.no_grad():
 			for data in self.test_loader:
-				_, traj_mask, past_traj, _, past_intention = self.data_preprocess(data)
+				_, traj_mask, past_traj, _, past_intention, past_similarity = self.data_preprocess(data)
 				
 				past_traj_movement = past_traj[..., :6]
 
-				sample_prediction, mean_estimation, variance_estimation, intention_estimation, angel_estimation = self.model_initializer(past_traj, past_intention, traj_mask)
+				sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation = self.model_initializer(past_traj, past_intention, past_similarity, traj_mask)
 				torch.save(sample_prediction, root_path+'p_var.pt')
 				torch.save(mean_estimation, root_path+'p_mean.pt')
 				torch.save(variance_estimation, root_path+'p_sigma.pt')
@@ -562,11 +591,11 @@ class Trainer:
 		count = 0
 		with torch.no_grad():
 			for data in self.test_loader:
-				batch_size, traj_mask, past_traj, fut_traj, past_intention = self.data_preprocess(data)
+				batch_size, traj_mask, past_traj, fut_traj, past_intention, past_similarity = self.data_preprocess(data)
 				fut_traj_xy = fut_traj[..., :2]
 				past_traj_movement = past_traj[..., :6]
 
-				sample_prediction, mean_estimation, variance_estimation, intention_estimation, angel_estimation = self.model_initializer(past_traj, past_intention, traj_mask)
+				sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation = self.model_initializer(past_traj, past_intention, past_similarity, traj_mask)
 				sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 				loc = sample_prediction + mean_estimation[:, None]
 			

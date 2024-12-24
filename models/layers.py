@@ -129,6 +129,25 @@ class social_transformer(nn.Module):
 
 		return h_feat
 
+class simularity_social_transformer(nn.Module):
+	def __init__(self, past_len):
+		super(simularity_social_transformer, self).__init__()
+		self.encode_past = nn.Linear(past_len*3, 256, bias=False)
+		self.layer = nn.TransformerEncoderLayer(d_model=256, nhead=2, dim_feedforward=256)
+		self.transformer_encoder = nn.TransformerEncoder(self.layer, num_layers=2)
+
+	def forward(self, h, mask):
+		'''
+		h: batch_size, t, 1
+		'''
+		h_feat = self.encode_past(h.reshape(h.size(0), -1)).unsqueeze(1)
+		# print(h_feat.shape)
+		# n_samples, 1, 64
+		h_feat_ = self.transformer_encoder(h_feat, mask)
+		h_feat = h_feat + h_feat_
+
+		return h_feat
+
 class intention_social_transformer(nn.Module):
 	def __init__(self, past_len):
 		super(intention_social_transformer, self).__init__()
@@ -138,7 +157,7 @@ class intention_social_transformer(nn.Module):
 
 	def forward(self, h, mask):
 		'''
-		h: batch_size, t, 2
+		h: batch_size, t, 9
 		'''
 		h_feat = self.encode_past(h.reshape(h.size(0), -1)).unsqueeze(1)
 		# print(h_feat.shape)
@@ -186,10 +205,10 @@ class st_encoder(nn.Module):
 
 		return state_x
 	
-class angel_encoder(nn.Module):
+class simularity_encoder(nn.Module):
 	def __init__(self):
 		super().__init__()
-		channel_in = 1
+		channel_in = 3
 		channel_out = 32
 		dim_kernel = 3
 		self.dim_embedding_key = 256
