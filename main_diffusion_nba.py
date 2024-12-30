@@ -23,7 +23,7 @@ def main(config):
 	if config.train==1:
 		t.fit()
 	else:
-		# t.save_data()
+		t.save_data()
 		t.test_single_model()
 
 

@@ -91,7 +91,7 @@ class Trainer:
 		model_cp = torch.load(self.cfg.pretrained_core_denoising_model, map_location='cpu')
 		self.model.load_state_dict(model_cp['model_dict'])
 
-		self.model_initializer = MyInitializationModel(t_h=10, d_h=6, t_f=20, d_f=2, k_pred=20).cuda()
+		self.model_initializer = StepweiseInitializer(t_h=10, d_h=6, t_f=20, d_f=2, k_pred=20).cuda()
 
 		self.opt = torch.optim.AdamW(self.model_initializer.parameters(), lr=config.learning_rate)
 		self.scheduler_model = torch.optim.lr_scheduler.StepLR(self.opt, step_size=self.cfg.decay_step, gamma=self.cfg.decay_gamma)
@@ -386,23 +386,17 @@ class Trainer:
 		"""
 		计算行人意图的损失，使得预测的意图向量与目标意图向量尽可能接近。
 		
-		:param intention_estimation: 预测的意图估计 (B, M, T, 3)
+		:param intention_estimation: 预测的意图估计 (B, T, 3)
 		:param target_intention: 目标意图向量 (B, T, 3)
 		:return: intention loss
 		"""
-		# 计算每个模态的意图向量与目标意图向量之间的欧几里得距离 (B, M, T)
-		# 注意，target_intention 需要扩展为 (B, M, T, 3) 以便与 intention_estimation 进行比较
-		target_intention_expanded = target_intention.unsqueeze(1)  # (B, 1, T, 3)
-		target_intention_expanded = target_intention_expanded.expand_as(intention_estimation)  # (B, M, T, 3)
 		
 		# 计算每个时间步的意图向量的欧几里得距离
-		distance = torch.norm(intention_estimation - target_intention_expanded, p=2, dim=-1)  # (B, M, T)
+		distance = torch.norm(intention_estimation - target_intention, p=2, dim=-1)  # (B, T)
 		
-		# 计算每个时间步的损失：距离越小，损失越小
-		intention_loss = distance.mean(dim=1)  # 对每个模态取平均，得到 (B, T)
 
 		# 使用时间加权的损失
-		weighted_intention_loss = (intention_loss * self.temporal_reweight.squeeze(0)).mean()
+		weighted_intention_loss = (distance * self.temporal_reweight.squeeze(0)).mean()
 
 		return weighted_intention_loss
 
@@ -449,8 +443,7 @@ class Trainer:
 			loc = sample_prediction + mean_estimation[:, None]
 			generated_y = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, loc)
 
-			goal_prediction = torch.exp(variance_estimation/2)[..., None, None] * goal_estimation / goal_estimation.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
-			goal_loc = goal_prediction + mean_estimation[:, None]
+			goal_loc = sample_prediction + goal_estimation[:, None]
 			generated_goal = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, goal_loc)
 			
 			loss_goal_dist = (	(generated_goal - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1)
@@ -474,13 +467,11 @@ class Trainer:
 								variance_estimation
 								).mean()
 			loss_intention = self.compute_intention_loss(intention_estimation, target_intention) 
-			# loss_angel = self.compute_angle_cosine_loss(angel_estimation.squeeze(-1), target_angel)
-			# 平均化M维度
-			similarity_estimation_avg = similarity_estimation.mean(dim=1)  # (B, T, 1)
 
+			loss_intention = loss_intention
 			# 计算L1损失
 			loss_similarity = ( 
-				torch.abs(similarity_estimation_avg - target_similarity) * self.temporal_reweight
+				torch.abs(similarity_estimation - target_similarity.squeeze(-1)) * self.temporal_reweight
 			).mean(dim=-1).min(dim=1)[0].mean()
 
 
@@ -540,8 +531,7 @@ class Trainer:
 			
 				pred_traj = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, loc)
 
-				goal_prediction = torch.exp(variance_estimation/2)[..., None, None] * goal_estimation / goal_estimation.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
-				goal_loc = goal_prediction + mean_estimation[:, None]
+				goal_loc = sample_prediction + goal_estimation[:, None]
 				generated_goal = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, goal_loc)
 
 				fut_traj_xy = fut_traj_xy.unsqueeze(1).repeat(1, 20, 1, 1)
