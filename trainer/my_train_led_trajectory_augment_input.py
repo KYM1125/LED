@@ -282,20 +282,22 @@ class Trainer:
 	def fit(self):
 		# Training loop
 		for epoch in range(0, self.cfg.num_epochs):
-			loss_total, loss_distance, loss_uncertainty, loss_intention, loss_simility = self._train_single_epoch(epoch)
+			loss_total, loss_distance, loss_uncertainty, loss_intention, loss_simility, loss_goal_distance, loss_goal_uncertainty = self._train_single_epoch(epoch)
 			# print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}'.format(
 			# 	time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
 			# 	epoch, loss_total, loss_distance, loss_uncertainty), self.log)
-			print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}\tLoss Intention: {:.6f}\tLoss Simility: {:.6f}'.format(
+			print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}\tLoss Intention: {:.6f}\tLoss Simility: {:.6f}\tLoss Goal Distance: {:.6f}\tLoss Goal Uncertainty: {:.6f}'.format(
 				time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
-				epoch, loss_total, loss_distance, loss_uncertainty, loss_intention, loss_simility), self.log)
+				epoch, loss_total, loss_distance, loss_uncertainty, loss_intention, loss_simility, loss_goal_distance, loss_goal_uncertainty), self.log)
 			
 			if (epoch + 1) % self.cfg.test_interval == 0:
-				performance, samples = self._test_single_epoch()
+				performance, samples, goal_samples = self._test_single_epoch()
 				for time_i in range(4):
-					print_log('--ADE({}s): {:.4f}\t--FDE({}s): {:.4f}'.format(
-						time_i+1, performance['ADE'][time_i]/samples,
-						time_i+1, performance['FDE'][time_i]/samples), self.log)
+					print_log('--ADE({}s): {:.4f}\t--FDE({}s): {:.4f}\t--Goal ADE({}s): {:.4f}\t--Goal FDE({}s): {:.4f}'.format(
+								time_i+1, performance['ADE'][time_i]/samples,
+								time_i+1, performance['FDE'][time_i]/samples,
+								time_i+1, performance['goal_ADE'][time_i]/goal_samples,
+								time_i+1, performance['goal_FDE'][time_i]/goal_samples), self.log)
 				cp_path = self.cfg.model_path % (epoch + 1)
 				model_cp = {'model_initializer_dict': self.model_initializer.state_dict()}
 				torch.save(model_cp, cp_path)
@@ -431,7 +433,7 @@ class Trainer:
 		
 		self.model.train()
 		self.model_initializer.train()
-		loss_total, loss_dt, loss_dc, loss_it, loss_sm, count = 0, 0, 0, 0, 0, 0
+		loss_total, loss_dt, loss_dc, loss_it, loss_sm, loss_goal_dt, loss_goal_dc, count = 0, 0, 0, 0, 0, 0, 0, 0
 		
 		# for data in self.train_loader:
 		for batch_idx, (data) in enumerate(self.train_loader):
@@ -441,12 +443,25 @@ class Trainer:
 			target_intention = fut_traj[..., 3:6]
 			past_traj_movement = past_traj[..., :6]
 
-			sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation = self.model_initializer(past_traj, past_intention, past_similarity, traj_mask)
+			sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation, goal_estimation = self.model_initializer(past_traj, past_intention, past_similarity, traj_mask)
 			sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 			loc = sample_prediction + mean_estimation[:, None]
-			# self.plot_angle_comparison_to_tensorboard(angel_estimation, target_angel, epoch)
 			generated_y = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, loc)
+
+			goal_prediction = torch.exp(variance_estimation/2)[..., None, None] * goal_estimation / goal_estimation.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
+			goal_loc = goal_prediction + mean_estimation[:, None]
+			generated_goal = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, goal_loc)
 			
+			loss_goal_dist = (	(generated_goal - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1)
+								* 
+							 self.temporal_reweight
+						).mean(dim=-1).min(dim=1)[0].mean()
+			loss_goal_uncertainty = (torch.exp(-variance_estimation)
+		       						*
+								(generated_goal - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1).mean(dim=(1, 2)) 
+									+ 
+								variance_estimation
+								).mean()
 			loss_dist = (	(generated_y - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1) 
 								* 
 							 self.temporal_reweight
@@ -468,12 +483,14 @@ class Trainer:
 			).mean(dim=-1).min(dim=1)[0].mean()
 
 
-			loss = loss_dist*50 + loss_uncertainty + loss_intention*10 + loss_similarity*10
+			loss = loss_dist*50 + loss_uncertainty + loss_intention*10 + loss_similarity*10 + loss_goal_dist*50 + loss_goal_uncertainty
 			loss_total += loss.item()
 			loss_dt += loss_dist.item()*50
 			loss_dc += loss_uncertainty.item()
 			loss_it += loss_intention.item()*10
 			loss_sm += loss_similarity.item()*10
+			loss_goal_dt += loss_goal_dist.item()*50
+			loss_goal_dc += loss_goal_uncertainty.item()
 
 			# 记录每个batch的损失到TensorBoard
 			writer_loss.add_scalar('Loss/train_total', loss_total, epoch * len(self.train_loader) + batch_idx)
@@ -481,6 +498,8 @@ class Trainer:
 			writer_loss.add_scalar('Loss/train_uncertainty', loss_dc, epoch * len(self.train_loader) + batch_idx)
 			writer_loss.add_scalar('Loss/train_intention', loss_it, epoch * len(self.train_loader) + batch_idx)
 			writer_loss.add_scalar('Loss/train_simularity', loss_sm, epoch * len(self.train_loader) + batch_idx)
+			writer_loss.add_scalar('Loss/train_goal_dist', loss_goal_dt, epoch * len(self.train_loader) + batch_idx)
+			writer_loss.add_scalar('Loss/train_goal_uncertainty', loss_goal_dc, epoch * len(self.train_loader) + batch_idx)
 
 			self.opt.zero_grad()
 			loss.backward()
@@ -490,13 +509,16 @@ class Trainer:
 			if self.cfg.debug and count == 2:
 				break
 
-		return loss_total/count, loss_dt/count, loss_dc/count, loss_it/count, loss_sm/count
+		return loss_total/count, loss_dt/count, loss_dc/count, loss_it/count, loss_sm/count, loss_goal_dt/count, loss_goal_dc/count
 
 
 	def _test_single_epoch(self):
 		performance = { 'FDE': [0, 0, 0, 0],
-						'ADE': [0, 0, 0, 0]}
+						'ADE': [0, 0, 0, 0],
+						'goal_FDE': [0, 0, 0, 0],
+						'goal_ADE': [0, 0, 0, 0]}
 		samples = 0
+		goal_samples = 0
 		def prepare_seed(rand_seed):
 			np.random.seed(rand_seed)
 			random.seed(rand_seed)
@@ -511,25 +533,39 @@ class Trainer:
 				target_angel = fut_traj[..., 2]
 				past_traj_movement = past_traj[..., :6]
 
-				sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation = self.model_initializer(past_traj, past_intention, past_similarity, traj_mask)
+				sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation, goal_estimation = self.model_initializer(past_traj, past_intention, past_similarity, traj_mask)
 				sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 				loc = sample_prediction + mean_estimation[:, None]
 			
 				pred_traj = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, loc)
 
+				goal_prediction = torch.exp(variance_estimation/2)[..., None, None] * goal_estimation / goal_estimation.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
+				goal_loc = goal_prediction + mean_estimation[:, None]
+				generated_goal = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, goal_loc)
+
 				fut_traj_xy = fut_traj_xy.unsqueeze(1).repeat(1, 20, 1, 1)
 				# b*n, K, T, 2
 				distances = torch.norm(fut_traj_xy - pred_traj, dim=-1) * self.traj_scale
+				
 				for time_i in range(1, 5):
 					ade = (distances[:, :, :5*time_i]).mean(dim=-1).min(dim=-1)[0].sum()
 					fde = (distances[:, :, 5*time_i-1]).min(dim=-1)[0].sum()
 					performance['ADE'][time_i-1] += ade.item()
 					performance['FDE'][time_i-1] += fde.item()
 				samples += distances.shape[0]
+
+				goal_distances = torch.norm(fut_traj_xy - generated_goal, dim=-1) * self.traj_scale
+
+				for time_i in range(1, 5):
+					ade = (goal_distances[:, :, :5*time_i]).mean(dim=-1).min(dim=-1)[0].sum()
+					fde = (goal_distances[:, :, 5*time_i-1]).min(dim=-1)[0].sum()
+					performance['goal_ADE'][time_i-1] += ade.item()
+					performance['goal_FDE'][time_i-1] += fde.item()
+				goal_samples += goal_distances.shape[0]
 				count += 1
 				# if count==100:
 				# 	break
-		return performance, samples
+		return performance, samples, goal_samples
 
 
 	def save_data(self):
