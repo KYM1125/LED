@@ -35,11 +35,10 @@ class StepweiseInitializer(nn.Module):
 		self.scale_encoder = MLP(1, 32, hid_feat=(4, 16), activation=nn.ReLU())
 
 		self.var_decoder = MLP(256*2+32, self.output_dim, hid_feat=(1024, 1024), activation=nn.ReLU())
-		self.mean_decoder = MLP(256*2, 1 * d_f, hid_feat=(256, 128), activation=nn.ReLU())
+		self.mean_decoder = MLP(256*2, 1 * 6, hid_feat=(256, 128), activation=nn.ReLU())
 		self.scale_decoder = MLP(256*2, 1, hid_feat=(256, 128), activation=nn.ReLU())
 		self.intention_decoder = MLP(256*2, 1 * 9, hid_feat=(256, 128), activation=nn.ReLU())
 		self.simularity_decoder = MLP(256*2, 1 * 3, hid_feat=(256, 128), activation=nn.ReLU())
-		self.next_goal_expander = MLP(2, 6, hid_feat=(256, 128), activation=nn.ReLU())
 
 	
 	def forward(self, x, intention, past_similarity, mask=None):
@@ -84,7 +83,7 @@ class StepweiseInitializer(nn.Module):
 
 			# 解码均值和方差
 			mean_total = torch.cat((ego_mean_embed, social_embed), dim=-1)
-			guess_mean = self.mean_decoder(mean_total).reshape(batch_size, 1, 2)  # B, 1, 2
+			guess_mean = self.mean_decoder(mean_total).reshape(batch_size, 1, 6)  # B, 1, 6
 
 			scale_total = torch.cat((ego_scale_embed, social_embed), dim=-1)
 			guess_scale = self.scale_decoder(scale_total)
@@ -94,18 +93,22 @@ class StepweiseInitializer(nn.Module):
 			guess_var = self.var_decoder(var_total).reshape(batch_size, self.n, 1, 2)  # B, K, 1, 2
 
 			# 生成下一帧目标点
-			mean_3d = torch.cat((guess_mean, torch.zeros_like(guess_mean[:, :, :1])), dim=-1)
-			next_goal = self.calculate_future_vectors_recursive(mean_3d, guess_intention[:,:,3:6], guess_simularity).unsqueeze(1)
+			mean_abs_3d = torch.cat((guess_mean[:,:,:2], torch.zeros_like(guess_mean[:, :, :1])), dim=-1)
+			mean_rel_3d = torch.cat((guess_mean[:,:,2:4], torch.zeros_like(guess_mean[:, :, :1])), dim=-1)
+			mean_vel_3d = torch.cat((guess_mean[:,:,4:], torch.zeros_like(guess_mean[:, :, :1])), dim=-1)
+			next_abs_goal = self.calculate_future_vectors_recursive(mean_abs_3d, guess_intention[:,:,:3], guess_simularity[:,:,0].unsqueeze(-1)).unsqueeze(1)
+			next_rel_goal = self.calculate_future_vectors_recursive(mean_rel_3d, guess_intention[:,:,3:6], guess_simularity[:,:,1].unsqueeze(-1)).unsqueeze(1)
+			next_vel_goal = self.calculate_future_vectors_recursive(mean_vel_3d, guess_intention[:,:,6:], guess_simularity[:,:,2].unsqueeze(-1)).unsqueeze(1)
 
 			# 保存当前时间步解码的结果
 			pred_var.append(guess_var)
-			pred_mean.append(guess_mean)
+			pred_mean.append(guess_mean[:,:,2:4])
 			pred_intentions.append(guess_intention)
 			pred_simularities.append(guess_simularity)
-			goal_mean.append(next_goal[..., :2])  # 只取前两维 (x, y)
+			goal_mean.append(next_rel_goal[..., :2])  # 只取前两维 (x, y)
 
 			# 更新输入帧 (添加解码结果作为新的观测帧)
-			next_goal = self.next_goal_expander(next_goal[..., :2])
+			next_goal = torch.cat([next_abs_goal[..., :2], next_rel_goal[..., :2], next_vel_goal[..., :2]], dim=-1)
 
 			x_next = torch.cat([x_current[:, 1:], next_goal[..., :6]], dim=1)
 			intention = torch.cat([intention[:, 1:], guess_intention], dim=1)  # 更新意图
@@ -120,7 +123,7 @@ class StepweiseInitializer(nn.Module):
 		pred_simularities = torch.cat(pred_simularities, dim=1)  # B, T, 3
 		goal_mean = torch.cat(goal_mean, dim=1)  # B, T, 2
 
-		return pred_var, pred_mean, guess_scale, pred_intentions[:,:,3:6], pred_simularities[:,:,1], goal_mean
+		return pred_var, pred_mean, guess_scale, pred_intentions, pred_simularities, goal_mean
 
 	
 	def calculate_future_vectors_recursive(self, x, intention, similarity):

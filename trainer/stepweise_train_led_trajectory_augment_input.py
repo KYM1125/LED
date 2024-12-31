@@ -373,14 +373,28 @@ class Trainer:
 		velocity_angle_change_fut = torch.cat((fut_traj_vel_angle[:, 1:] - fut_traj_vel_angle[:, :-1], torch.zeros_like(fut_traj_vel_angle[:, -1:])), dim=1).unsqueeze(-1)
 		acceleration_angle_change_fut = torch.cat((fut_traj_acc_angle[:, 1:] - fut_traj_acc_angle[:, :-1], torch.zeros_like(fut_traj_acc_angle[:, -1:])), dim=1).unsqueeze(-1)
 		
+		fut_traj_abs_3d = torch.cat((fut_traj_abs, torch.zeros_like(fut_traj_abs[..., :1])), dim=-1)
 		fut_traj_rel_3d = torch.cat((fut_traj_rel, torch.zeros_like(fut_traj_rel[..., :1])), dim=-1)
-		fut_similarity = torch.sum(fut_traj_rel_3d[:, :-1] * fut_traj_rel_3d[:, 1:], dim=-1).unsqueeze(-1) # 当前帧点乘下一帧
-		fut_similarity = torch.cat((fut_similarity, torch.zeros_like(fut_similarity[:, -1:, :])), dim=1)
-		fut_intention = torch.cross(fut_traj_rel_3d[:, :-1], fut_traj_rel_3d[:, 1:], dim=-1) # 当前帧叉乘下一帧
-		fut_intention = torch.cat((fut_intention, torch.zeros_like(fut_intention[:, -1:, :])), dim=1)
+		fut_traj_vel_3d = torch.cat((fut_traj_vel, torch.zeros_like(fut_traj_vel[..., :1])), dim=-1)
+
+		fut_abs_similarity = torch.sum(fut_traj_abs_3d[:, :-1] * fut_traj_abs_3d[:, 1:], dim=-1).unsqueeze(-1) # 当前帧点乘下一帧
+		fut_abs_similarity = torch.cat((fut_abs_similarity, torch.zeros_like(fut_abs_similarity[:, -1:, :])), dim=1)
+		fut_rel_similarity = torch.sum(fut_traj_rel_3d[:, :-1] * fut_traj_rel_3d[:, 1:], dim=-1).unsqueeze(-1) # 当前帧点乘下一帧
+		fut_rel_similarity = torch.cat((fut_rel_similarity, torch.zeros_like(fut_rel_similarity[:, -1:, :])), dim=1)
+		fut_vel_similarity = torch.sum(fut_traj_vel_3d[:, :-1] * fut_traj_vel_3d[:, 1:], dim=-1).unsqueeze(-1) # 当前帧点乘下一帧
+		fut_vel_similarity = torch.cat((fut_vel_similarity, torch.zeros_like(fut_vel_similarity[:, -1:, :])), dim=1)
 		
-		fut_traj = torch.cat((fut_traj_rel, fut_similarity, fut_intention), dim=-1)
-		return batch_size, traj_mask, past_traj, fut_traj, past_intention, past_similarity,
+		fut_abs_intention = torch.cross(fut_traj_abs_3d[:, :-1], fut_traj_abs_3d[:, 1:], dim=-1) # 当前帧叉乘下一帧
+		fut_abs_intention = torch.cat((fut_abs_intention, torch.zeros_like(fut_abs_intention[:, -1:, :])), dim=1)
+		fut_rel_intention = torch.cross(fut_traj_rel_3d[:, :-1], fut_traj_rel_3d[:, 1:], dim=-1) # 当前帧叉乘下一帧
+		fut_rel_intention = torch.cat((fut_rel_intention, torch.zeros_like(fut_rel_intention[:, -1:, :])), dim=1)
+		fut_vel_intention = torch.cross(fut_traj_vel_3d[:, :-1], fut_traj_vel_3d[:, 1:], dim=-1) # 当前帧叉乘下一帧
+		fut_vel_intention = torch.cat((fut_vel_intention, torch.zeros_like(fut_vel_intention[:, -1:, :])), dim=1)
+		
+		fut_similarity = torch.cat((fut_abs_similarity, fut_rel_similarity, fut_vel_similarity), dim=-1)
+		fut_intention = torch.cat((fut_abs_intention, fut_rel_intention, fut_vel_intention), dim=-1)
+
+		return batch_size, traj_mask, past_traj, fut_traj_rel, past_intention, past_similarity, fut_intention, fut_similarity
 
 	def compute_intention_loss(self, intention_estimation, target_intention):
 		"""
@@ -432,11 +446,11 @@ class Trainer:
 		
 		# for data in self.train_loader:
 		for batch_idx, (data) in enumerate(self.train_loader):
-			batch_size, traj_mask, past_traj, fut_traj, past_intention, past_similarity = self.data_preprocess(data)
-			fut_traj_xy = fut_traj[..., :2]
-			target_similarity = fut_traj[..., 2].unsqueeze(-1)
-			target_intention = fut_traj[..., 3:6]
-			past_traj_movement = past_traj[..., :6]
+			batch_size, traj_mask, past_traj, fut_traj, past_intention, past_similarity, fut_intention, fut_similarity = self.data_preprocess(data)
+			fut_traj_xy = fut_traj
+			target_similarity = fut_similarity
+			target_intention = fut_intention
+			past_traj_movement = past_traj
 
 			sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation, goal_estimation = self.model_initializer(past_traj, past_intention, past_similarity, traj_mask)
 			sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
@@ -469,10 +483,10 @@ class Trainer:
 			loss_intention = self.compute_intention_loss(intention_estimation, target_intention) 
 
 			loss_intention = loss_intention
+
+			L1_distance = torch.norm(intention_estimation - target_intention, p=1, dim=-1)  # (B, T)
 			# 计算L1损失
-			loss_similarity = ( 
-				torch.abs(similarity_estimation - target_similarity.squeeze(-1)) * self.temporal_reweight
-			).mean(dim=-1).min(dim=1)[0].mean()
+			loss_similarity = (L1_distance * self.temporal_reweight.squeeze(0)).mean()
 
 
 			loss = loss_dist*50 + loss_uncertainty + loss_intention*10 + loss_similarity*10 + loss_goal_dist*50 + loss_goal_uncertainty
@@ -520,10 +534,9 @@ class Trainer:
 		count = 0
 		with torch.no_grad():
 			for data in self.test_loader:
-				batch_size, traj_mask, past_traj, fut_traj, past_intention, past_similarity = self.data_preprocess(data)
-				fut_traj_xy = fut_traj[..., :2]
-				target_angel = fut_traj[..., 2]
-				past_traj_movement = past_traj[..., :6]
+				batch_size, traj_mask, past_traj, fut_traj, past_intention, past_similarity, fut_intention, fut_similarity = self.data_preprocess(data)
+				fut_traj_xy = fut_traj
+				past_traj_movement = past_traj
 
 				sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation, goal_estimation = self.model_initializer(past_traj, past_intention, past_similarity, traj_mask)
 				sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
