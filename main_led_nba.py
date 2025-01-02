@@ -2,7 +2,8 @@ import argparse
 # from trainer import stepweise_train_led_trajectory_augment_input as led
 # from trainer import train_led_trajectory_augment_input as led
 # from trainer import my_train_led_trajectory_augment_input as led
-from trainer import mean_train_led_trajectory_augment_input as led
+# from trainer import mean_train_led_trajectory_augment_input as led
+from trainer import full_intention_train_led_trajectory as led
 
 def parse_config():
 	parser = argparse.ArgumentParser()
@@ -24,7 +25,7 @@ def main(config):
 	if config.train==1:
 		t.fit()
 	else:
-		# t.save_data()
+		t.save_data()
 		t.test_single_model()
 
 

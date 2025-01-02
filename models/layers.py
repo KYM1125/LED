@@ -125,13 +125,35 @@ class social_transformer(nn.Module):
 		# print(h_feat.shape)
 		# n_samples, 1, 64
 		h_feat_ = self.transformer_encoder(h_feat, mask)
-		h_feat = h_feat + h_feat_
+		# h_feat = h_feat + h_feat_
 
 		return h_feat
+	
+class mode_transformer(nn.Module):
+    def __init__(self, k, future_len):
+        super(mode_transformer, self).__init__()
+        self.encoder = nn.Linear(future_len * 3, 128, bias=False)
+        self.layer = nn.TransformerEncoderLayer(d_model=128, nhead=2, dim_feedforward=128)
+        self.transformer_encoder = nn.TransformerEncoder(self.layer, num_layers=1)
 
-class simularity_social_transformer(nn.Module):
+    def forward(self, h):
+        '''
+        h: batch_size, k, t, 3
+        '''
+        batch_size, k, t, c = h.size()
+        h = h.view(batch_size * k, t, c)  
+
+        h_feat = self.encoder(h.reshape(h.size(0), -1))  # (B*K, 128)
+        h_feat = h_feat.view(batch_size, k, -1) # (B, K, 128)
+
+        h_feat = self.transformer_encoder(h_feat, mask=None)  # (B, K, 128)
+
+        return h_feat
+
+
+class similarity_social_transformer(nn.Module):
 	def __init__(self, past_len):
-		super(simularity_social_transformer, self).__init__()
+		super(similarity_social_transformer, self).__init__()
 		self.encode_past = nn.Linear(past_len*3, 256, bias=False)
 		self.layer = nn.TransformerEncoderLayer(d_model=256, nhead=2, dim_feedforward=256)
 		self.transformer_encoder = nn.TransformerEncoder(self.layer, num_layers=2)
@@ -144,7 +166,7 @@ class simularity_social_transformer(nn.Module):
 		# print(h_feat.shape)
 		# n_samples, 1, 64
 		h_feat_ = self.transformer_encoder(h_feat, mask)
-		h_feat = h_feat + h_feat_
+		# h_feat = h_feat + h_feat_
 
 		return h_feat
 
@@ -163,7 +185,7 @@ class intention_social_transformer(nn.Module):
 		# print(h_feat.shape)
 		# n_samples, 1, 64
 		h_feat_ = self.transformer_encoder(h_feat, mask)
-		h_feat = h_feat + h_feat_
+		# h_feat = h_feat + h_feat_
 
 		return h_feat
 
@@ -205,7 +227,7 @@ class st_encoder(nn.Module):
 
 		return state_x
 	
-class simularity_encoder(nn.Module):
+class similarity_encoder(nn.Module):
 	def __init__(self):
 		super().__init__()
 		channel_in = 3

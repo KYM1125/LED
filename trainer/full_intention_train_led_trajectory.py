@@ -16,11 +16,12 @@ import matplotlib.pyplot as plt
 from IPython.display import Image, display
 from torch.utils.tensorboard import SummaryWriter
 
-from models.model_led_initializer import LEDInitializer as InitializationModel
+# from models.model_led_initializer import LEDInitializer as InitializationModel
 from models.model_diffusion import TransformerDenoisingModel as CoreDenoisingModel
 # from models.model_led_initializer_with_intention import VecIntInitializer as MyInitializationModel
-from models.model_led_stepweise import StepweiseInitializer
-from models.model_led_initializer_with_intention_mean import VecIntInitializer as MyInitializationModel
+# from models.model_led_stepweise import StepweiseInitializer
+from models.model_led_initializer_with_full_intention import VecIntInitializer as FullIntentionModel
+from losses import MixtureNLLLoss
 
 import pdb
 NUM_Tau = 5
@@ -92,7 +93,7 @@ class Trainer:
 		model_cp = torch.load(self.cfg.pretrained_core_denoising_model, map_location='cpu')
 		self.model.load_state_dict(model_cp['model_dict'])
 
-		self.model_initializer = MyInitializationModel(t_h=10, d_h=6, t_f=20, d_f=2, k_pred=20).cuda()
+		self.model_initializer = FullIntentionModel(t_h=10, d_h=6, t_f=20, d_f=2, k_pred=20).cuda()
 
 		self.opt = torch.optim.AdamW(self.model_initializer.parameters(), lr=config.learning_rate)
 		self.scheduler_model = torch.optim.lr_scheduler.StepLR(self.opt, step_size=self.cfg.decay_step, gamma=self.cfg.decay_gamma)
@@ -104,6 +105,9 @@ class Trainer:
 
 		# temporal reweight in the loss, it is not necessary.
 		self.temporal_reweight = torch.FloatTensor([21 - i for i in range(1, 21)]).cuda().unsqueeze(0).unsqueeze(0) / 10
+
+		self.nll_loss = MixtureNLLLoss(component_distribution=['laplace'] * 2 + ['von_mises'] * 20,
+									   reduction='none')
 
 
 	def print_model_param(self, model: nn.Module, name: str = 'Model') -> None:
@@ -284,14 +288,13 @@ class Trainer:
 	def fit(self):
 		# Training loop
 		for epoch in range(0, self.cfg.num_epochs):
-			loss_total, loss_distance, loss_uncertainty, loss_intention, loss_simility, loss_goal_distance, loss_goal_uncertainty = self._train_single_epoch(epoch)
+			loss_total, loss_distance, loss_uncertainty, loss_intention, loss_simility, loss_goal_distance, loss_goal_uncertainty, loss_class = self._train_single_epoch(epoch)
 			# print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}'.format(
 			# 	time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
 			# 	epoch, loss_total, loss_distance, loss_uncertainty), self.log)
-			print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}\tLoss Intention: {:.6f}\tLoss Simility: {:.6f}\tLoss Goal Distance: {:.6f}\tLoss Goal Uncertainty: {:.6f}'.format(
+			print_log('[{}] Epoch: {}\t\tLoss: {:.6f}\tLoss Dist.: {:.6f}\tLoss Uncertainty: {:.6f}\tLoss Intention: {:.6f}\tLoss Simility: {:.6f}\tLoss Goal Distance: {:.6f}\tLoss Goal Uncertainty: {:.6f}\tLoss Class: {:.6f}'.format(
 				time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), 
-				epoch, loss_total, loss_distance, loss_uncertainty, loss_intention, loss_simility, loss_goal_distance, loss_goal_uncertainty), self.log)
-			
+				epoch, loss_total, loss_distance, loss_uncertainty, loss_intention, loss_simility, loss_goal_distance, loss_goal_uncertainty, loss_class), self.log)
 			if (epoch + 1) % self.cfg.test_interval == 0:
 				performance, samples, goal_samples = self._test_single_epoch()
 				for time_i in range(4):
@@ -383,20 +386,33 @@ class Trainer:
 		fut_traj = torch.cat((fut_traj_rel, fut_similarity, fut_intention), dim=-1)
 		return batch_size, traj_mask, past_traj, fut_traj, past_intention, past_similarity,
 
-	def compute_intention_loss(self, intention_estimation, target_intention):
+	def compute_intention_loss(self, intention_estimation, target_intention, probabilities):
 		"""
 		计算行人意图的损失，使得预测的意图向量与目标意图向量尽可能接近。
-
-		:param intention_estimation: 预测的意图估计 (B, T, 3)
+		
+		:param intention_estimation: 预测的意图估计 (B, M, T, 3)
 		:param target_intention: 目标意图向量 (B, T, 3)
+		:param probabilities: 每个模态的概率 (B, M)
 		:return: intention loss
 		"""
-		# 计算意图向量之间的欧几里得距离 (B, T)
-		distance = torch.norm(intention_estimation - target_intention, p=2, dim=-1)  # (B, T)
-		weighted_distance = distance * self.temporal_reweight.squeeze(0)  # (B, T)
-		intention_loss = weighted_distance.mean()  # 计算加权平均损失
+		# 计算每个模态的意图向量与目标意图向量之间的欧几里得距离 (B, M, T)
+		# 注意，target_intention 需要扩展为 (B, M, T, 3) 以便与 intention_estimation 进行比较
+		target_intention_expanded = target_intention.unsqueeze(1)  # (B, 1, T, 3)
+		target_intention_expanded = target_intention_expanded.expand_as(intention_estimation)  # (B, M, T, 3)
+		
+		# 计算每个时间步的意图向量的欧几里得距离
+		distance = torch.norm(intention_estimation - target_intention_expanded, p=2, dim=-1)  # (B, M, T)
+		
+		probabilities_expanded = probabilities.unsqueeze(-1)  # (B, M, 1)
+	
+		# 对模态进行加权的距离
+		weighted_distance = (distance * probabilities_expanded).sum(dim=1) / probabilities_expanded.sum(dim=1)  # (B, T)
 
-		return intention_loss
+		# 使用时间加权的损失
+		weighted_intention_loss = (weighted_distance * self.temporal_reweight.squeeze(0)).mean()
+
+		return weighted_intention_loss
+
 	
 	def compute_angle_cosine_loss(self, angel_estimation, target_angel):
 		"""
@@ -425,7 +441,7 @@ class Trainer:
 		
 		self.model.train()
 		self.model_initializer.train()
-		loss_total, loss_dt, loss_dc, loss_it, loss_sm, loss_goal_dt, loss_goal_dc, count = 0, 0, 0, 0, 0, 0, 0, 0
+		loss_total, loss_dt, loss_dc, loss_it, loss_sm, loss_goal_dt, loss_goal_dc, loss_cls, count = 0, 0, 0, 0, 0, 0, 0, 0, 0
 		
 		# for data in self.train_loader:
 		for batch_idx, (data) in enumerate(self.train_loader):
@@ -435,12 +451,17 @@ class Trainer:
 			target_intention = fut_traj[..., 3:6]
 			past_traj_movement = past_traj[..., :6]
 
-			sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation, goal_estimation = self.model_initializer(past_traj, past_intention, past_similarity, traj_mask)
+			pred = self.model_initializer(past_traj_movement, past_intention, past_similarity, traj_mask)
+			sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation, goal_sample_estimation, goal_mean_estimation, concentration, probabilities = (
+				pred[k] for k in ["guess_var", "guess_mean", "guess_scale", "guess_intention", "guess_similarity", "goal_var", "goal_mean", "conc", "prob"]
+			)
+
 			sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 			loc = sample_prediction + mean_estimation[:, None]
 			generated_y = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, loc)
 
-			goal_loc = sample_prediction + goal_estimation[:, None]
+			goal_sample_estimation = torch.exp(variance_estimation/2)[..., None, None] * goal_sample_estimation / goal_sample_estimation.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
+			goal_loc = goal_sample_estimation + goal_mean_estimation[:, None]
 			generated_goal = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, goal_loc)
 			
 			loss_goal_dist = (	(generated_goal - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1)
@@ -448,7 +469,7 @@ class Trainer:
 							 self.temporal_reweight
 						).mean(dim=-1).min(dim=1)[0].mean()
 			loss_goal_uncertainty = (torch.exp(-variance_estimation)
-		       						*
+			   						*
 								(generated_goal - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1).mean(dim=(1, 2)) 
 									+ 
 								variance_estimation
@@ -458,27 +479,45 @@ class Trainer:
 							 self.temporal_reweight
 						).mean(dim=-1).min(dim=1)[0].mean()
 			loss_uncertainty = (torch.exp(-variance_estimation)
-		       						*
+			   						*
 								(generated_y - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1).mean(dim=(1, 2)) 
 									+ 
 								variance_estimation
 								).mean()
-			loss_intention = self.compute_intention_loss(intention_estimation, target_intention) 
+			
+			# Step 1: 计算每个模态与真实轨迹的距离 (B, M, T, 2)
+			distances = (generated_goal - fut_traj_xy.unsqueeze(1)).norm(p=2, dim=-1)  # (B, M, T)
+
+			# Step 2: 对时间维度求平均，得到每个模态的平均距离 (B, M)
+			mean_distances = distances.mean(dim=-1)  # (B, M)
+
+			# Step 3: 找到距离最小的模态索引 (B,)
+			best_mode = mean_distances.argmin(dim=-1)  # (B,)
+			
+			# 分类损失：调整模态概率
+			cls_loss = -torch.log(probabilities[torch.arange(batch_size*11), best_mode] + 1e-6).mean()
+
+			loss_intention = self.compute_intention_loss(intention_estimation, target_intention, probabilities) 
+
+			# 平均化M维度
+			probabilities = probabilities.unsqueeze(-1).unsqueeze(-1)  # (B, K, 1, 1)
+			similarity_estimation_avg = (similarity_estimation * probabilities).sum(dim=1) / probabilities.sum(dim=1)  # (B, T, 1)
 
 			# 计算L1损失
 			loss_similarity = ( 
-				torch.abs(similarity_estimation - target_similarity) * self.temporal_reweight
+				torch.abs(similarity_estimation_avg - target_similarity) * self.temporal_reweight
 			).mean(dim=-1).min(dim=1)[0].mean()
 
-
-			loss = loss_dist*50 + loss_uncertainty + loss_intention*10 + loss_similarity*10 + loss_goal_dist*50 + loss_goal_uncertainty
+			
+			loss = loss_dist*50 + loss_uncertainty + loss_intention*10 + loss_similarity*100 + loss_goal_dist*50 + loss_goal_uncertainty + cls_loss
 			loss_total += loss.item()
 			loss_dt += loss_dist.item()*50
 			loss_dc += loss_uncertainty.item()
 			loss_it += loss_intention.item()*10
-			loss_sm += loss_similarity.item()*10
+			loss_sm += loss_similarity.item()*100
 			loss_goal_dt += loss_goal_dist.item()*50
 			loss_goal_dc += loss_goal_uncertainty.item()
+			loss_cls += cls_loss.item()
 
 			# 记录每个batch的损失到TensorBoard
 			writer_loss.add_scalar('Loss/train_total', loss_total, epoch * len(self.train_loader) + batch_idx)
@@ -488,6 +527,7 @@ class Trainer:
 			writer_loss.add_scalar('Loss/train_simularity', loss_sm, epoch * len(self.train_loader) + batch_idx)
 			writer_loss.add_scalar('Loss/train_goal_dist', loss_goal_dt, epoch * len(self.train_loader) + batch_idx)
 			writer_loss.add_scalar('Loss/train_goal_uncertainty', loss_goal_dc, epoch * len(self.train_loader) + batch_idx)
+			writer_loss.add_scalar('Loss/train_cls', loss_cls, epoch * len(self.train_loader) + batch_idx)
 
 			self.opt.zero_grad()
 			loss.backward()
@@ -497,7 +537,7 @@ class Trainer:
 			if self.cfg.debug and count == 2:
 				break
 
-		return loss_total/count, loss_dt/count, loss_dc/count, loss_it/count, loss_sm/count, loss_goal_dt/count, loss_goal_dc/count
+		return loss_total/count, loss_dt/count, loss_dc/count, loss_it/count, loss_sm/count, loss_goal_dt/count, loss_goal_dc/count, loss_cls/count
 
 
 	def _test_single_epoch(self):
@@ -521,13 +561,18 @@ class Trainer:
 				target_angel = fut_traj[..., 2]
 				past_traj_movement = past_traj[..., :6]
 
-				sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation, goal_estimation = self.model_initializer(past_traj, past_intention, past_similarity, traj_mask)
+				pred = self.model_initializer(past_traj_movement, past_intention, past_similarity, traj_mask)
+				sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation, goal_sample_estimation, goal_mean_estimation, concentration, probabilities = (
+					pred[k] for k in ["guess_var", "guess_mean", "guess_scale", "guess_intention", "guess_similarity", "goal_var", "goal_mean", "conc", "prob"]
+				)
+
 				sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 				loc = sample_prediction + mean_estimation[:, None]
 			
 				pred_traj = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, loc)
 
-				goal_loc = sample_prediction + goal_estimation[:, None]
+				goal_sample_estimation = torch.exp(variance_estimation/2)[..., None, None] * goal_sample_estimation / goal_sample_estimation.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
+				goal_loc = goal_sample_estimation + goal_mean_estimation[:, None]
 				generated_goal = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, goal_loc)
 
 				fut_traj_xy = fut_traj_xy.unsqueeze(1).repeat(1, 20, 1, 1)
@@ -559,7 +604,7 @@ class Trainer:
 		'''
 		Save the visualization data.
 		'''
-		model_path = './results/led_augment_debug/1_1_test_mean_intention/models/model_0100.p'
+		model_path = './results/my_led_augment_debug/12_24_new_prototype_with_goal/models/model_0100.p'
 		model_dict = torch.load(model_path, map_location=torch.device('cpu'))['model_initializer_dict']
 		self.model_initializer.load_state_dict(model_dict)
 		def prepare_seed(rand_seed):
@@ -587,20 +632,18 @@ class Trainer:
 				sample_prediction = torch.exp(variance_estimation/2)[..., None, None] * sample_prediction / sample_prediction.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
 				loc = sample_prediction + mean_estimation[:, None]
 				
-				goal_loc = sample_prediction + goal_estimation[:, None]
+				goal_prediction = torch.exp(variance_estimation/2)[..., None, None] * goal_estimation / goal_estimation.std(dim=1).mean(dim=(1, 2))[:, None, None, None]
+				goal_loc = goal_prediction + mean_estimation[:, None]
 				pred_goal = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, goal_loc)
 
 				pred_traj = self.p_sample_loop_accelerate(past_traj_movement, traj_mask, loc)
 				pred_mean = self.p_sample_loop_mean(past_traj_movement, traj_mask, mean_estimation)
-				pred_goal_mean = self.p_sample_loop_mean(past_traj_movement, traj_mask, goal_estimation)
-
 
 				torch.save(data['pre_motion_3D'], root_path+'past.pt')
 				torch.save(data['fut_motion_3D'], root_path+'future.pt')
 				torch.save(pred_traj, root_path+'prediction.pt')
 				torch.save(pred_goal, root_path+'goal.pt')
 				torch.save(pred_mean, root_path+'p_mean_denoise.pt')
-				torch.save(pred_goal_mean, root_path+'p_goal_mean_denoise.pt')
 
 				# 临时终止程序以调试生成数据
 				print("Debug: Data saving completed for one batch. Stopping execution for inspection.")
