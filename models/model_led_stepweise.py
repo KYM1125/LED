@@ -123,7 +123,9 @@ class StepweiseInitializer(nn.Module):
 		pred_simularities = torch.cat(pred_simularities, dim=1)  # B, T, 3
 		goal_mean = torch.cat(goal_mean, dim=1)  # B, T, 2
 
-		return pred_var, pred_mean, guess_scale, pred_intentions, pred_simularities, goal_mean
+		intention_mean = torch.cat([pred_mean[:, 0, :].unsqueeze(1), goal_mean[:, :-1, :]], dim=1)
+
+		return pred_var, pred_mean, guess_scale, pred_intentions, pred_simularities, intention_mean
 
 	
 	def calculate_future_vectors_recursive(self, x, intention, similarity):
