@@ -125,7 +125,7 @@ class social_transformer(nn.Module):
 		# print(h_feat.shape)
 		# n_samples, 1, 64
 		h_feat_ = self.transformer_encoder(h_feat, mask)
-		# h_feat = h_feat + h_feat_
+		h_feat = h_feat + h_feat_
 
 		return h_feat
 	
@@ -166,7 +166,7 @@ class similarity_social_transformer(nn.Module):
 		# print(h_feat.shape)
 		# n_samples, 1, 64
 		h_feat_ = self.transformer_encoder(h_feat, mask)
-		# h_feat = h_feat + h_feat_
+		h_feat = h_feat + h_feat_
 
 		return h_feat
 
@@ -185,7 +185,7 @@ class intention_social_transformer(nn.Module):
 		# print(h_feat.shape)
 		# n_samples, 1, 64
 		h_feat_ = self.transformer_encoder(h_feat, mask)
-		# h_feat = h_feat + h_feat_
+		h_feat = h_feat + h_feat_
 
 		return h_feat
 

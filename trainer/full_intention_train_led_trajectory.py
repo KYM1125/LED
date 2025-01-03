@@ -21,7 +21,6 @@ from models.model_diffusion import TransformerDenoisingModel as CoreDenoisingMod
 # from models.model_led_initializer_with_intention import VecIntInitializer as MyInitializationModel
 # from models.model_led_stepweise import StepweiseInitializer
 from models.model_led_initializer_with_full_intention import VecIntInitializer as FullIntentionModel
-from losses import MixtureNLLLoss
 
 import pdb
 NUM_Tau = 5
@@ -106,8 +105,6 @@ class Trainer:
 		# temporal reweight in the loss, it is not necessary.
 		self.temporal_reweight = torch.FloatTensor([21 - i for i in range(1, 21)]).cuda().unsqueeze(0).unsqueeze(0) / 10
 
-		self.nll_loss = MixtureNLLLoss(component_distribution=['laplace'] * 2 + ['von_mises'] * 20,
-									   reduction='none')
 
 
 	def print_model_param(self, model: nn.Module, name: str = 'Model') -> None:
@@ -449,7 +446,7 @@ class Trainer:
 			fut_traj_xy = fut_traj[..., :2]
 			target_similarity = fut_traj[..., 2].unsqueeze(-1)
 			target_intention = fut_traj[..., 3:6]
-			past_traj_movement = past_traj[..., :6]
+			past_traj_movement = past_traj
 
 			pred = self.model_initializer(past_traj_movement, past_intention, past_similarity, traj_mask)
 			sample_prediction, mean_estimation, variance_estimation, intention_estimation, similarity_estimation, goal_sample_estimation, goal_mean_estimation, concentration, probabilities = (
@@ -495,7 +492,7 @@ class Trainer:
 			best_mode = mean_distances.argmin(dim=-1)  # (B,)
 			
 			# 分类损失：调整模态概率
-			cls_loss = -torch.log(probabilities[torch.arange(batch_size*11), best_mode] + 1e-6).mean()
+			cls_loss = -torch.log(probabilities[torch.arange(generated_goal.size(0)), best_mode] + 1e-6).mean()
 
 			loss_intention = self.compute_intention_loss(intention_estimation, target_intention, probabilities) 
 

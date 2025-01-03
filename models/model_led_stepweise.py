@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from models.layers import MLP, social_transformer, st_encoder, simularity_encoder, simularity_social_transformer, intention_social_transformer, intention_encoder
+from models.layers import MLP, social_transformer, st_encoder, similarity_encoder, similarity_social_transformer, intention_social_transformer, intention_encoder
 from scipy.spatial.transform import Rotation as R
 
 class StepweiseInitializer(nn.Module):
@@ -25,12 +25,12 @@ class StepweiseInitializer(nn.Module):
 
 		self.social_encoder = social_transformer(t_h)
 		self.intention_social_encoder = intention_social_transformer(t_h)
-		self.simularity_social_encoder = simularity_social_transformer(t_h)
+		self.similarity_social_encoder = similarity_social_transformer(t_h)
 		self.ego_var_encoder = st_encoder()
 		self.ego_mean_encoder = st_encoder()
 		self.ego_scale_encoder = st_encoder()
 		self.ego_intention_encoder = intention_encoder()
-		self.ego_simularity_encoder = simularity_encoder()
+		self.ego_similarity_encoder = similarity_encoder()
 
 		self.scale_encoder = MLP(1, 32, hid_feat=(4, 16), activation=nn.ReLU())
 
@@ -38,7 +38,7 @@ class StepweiseInitializer(nn.Module):
 		self.mean_decoder = MLP(256*2, 1 * 6, hid_feat=(256, 128), activation=nn.ReLU())
 		self.scale_decoder = MLP(256*2, 1, hid_feat=(256, 128), activation=nn.ReLU())
 		self.intention_decoder = MLP(256*2, 1 * 9, hid_feat=(256, 128), activation=nn.ReLU())
-		self.simularity_decoder = MLP(256*2, 1 * 3, hid_feat=(256, 128), activation=nn.ReLU())
+		self.similarity_decoder = MLP(256*2, 1 * 3, hid_feat=(256, 128), activation=nn.ReLU())
 
 	
 	def forward(self, x, intention, past_similarity, mask=None):
@@ -64,22 +64,22 @@ class StepweiseInitializer(nn.Module):
 			# 编码
 			social_embed = self.social_encoder(x_current, mask).squeeze(1)
 			intention_social_embed = self.intention_social_encoder(intention, mask).squeeze(1)
-			simularity_social_embed = self.simularity_social_encoder(past_similarity, mask).squeeze(1)
+			similarity_social_embed = self.similarity_social_encoder(past_similarity, mask).squeeze(1)
 
 			# 自特征编码
 			ego_var_embed = self.ego_var_encoder(x_current)
 			ego_mean_embed = self.ego_mean_encoder(x_current)
 			ego_scale_embed = self.ego_scale_encoder(x_current)
 			ego_intention_embed = self.ego_intention_encoder(intention)
-			ego_simularity_embed = self.ego_simularity_encoder(past_similarity)
+			ego_similarity_embed = self.ego_similarity_encoder(past_similarity)
 
 			# 解码意图
 			intention_total = torch.cat((ego_intention_embed, intention_social_embed), dim=-1)
 			guess_intention = self.intention_decoder(intention_total).reshape(batch_size, 1, 9)  # B, 1, 9
 
 			# 解码相似性
-			simularity_total = torch.cat((ego_simularity_embed, simularity_social_embed), dim=-1)
-			guess_simularity = self.simularity_decoder(simularity_total).reshape(batch_size, 1, 3)  # B, 1, 3
+			similarity_total = torch.cat((ego_similarity_embed, similarity_social_embed), dim=-1)
+			guess_similarity = self.similarity_decoder(similarity_total).reshape(batch_size, 1, 3)  # B, 1, 3
 
 			# 解码均值和方差
 			mean_total = torch.cat((ego_mean_embed, social_embed), dim=-1)
@@ -96,15 +96,15 @@ class StepweiseInitializer(nn.Module):
 			mean_abs_3d = torch.cat((guess_mean[:,:,:2], torch.zeros_like(guess_mean[:, :, :1])), dim=-1)
 			mean_rel_3d = torch.cat((guess_mean[:,:,2:4], torch.zeros_like(guess_mean[:, :, :1])), dim=-1)
 			mean_vel_3d = torch.cat((guess_mean[:,:,4:], torch.zeros_like(guess_mean[:, :, :1])), dim=-1)
-			next_abs_goal = self.calculate_future_vectors_recursive(mean_abs_3d, guess_intention[:,:,:3], guess_simularity[:,:,0].unsqueeze(-1)).unsqueeze(1)
-			next_rel_goal = self.calculate_future_vectors_recursive(mean_rel_3d, guess_intention[:,:,3:6], guess_simularity[:,:,1].unsqueeze(-1)).unsqueeze(1)
-			next_vel_goal = self.calculate_future_vectors_recursive(mean_vel_3d, guess_intention[:,:,6:], guess_simularity[:,:,2].unsqueeze(-1)).unsqueeze(1)
+			next_abs_goal = self.calculate_future_vectors_recursive(mean_abs_3d, guess_intention[:,:,:3], guess_similarity[:,:,0].unsqueeze(-1)).unsqueeze(1)
+			next_rel_goal = self.calculate_future_vectors_recursive(mean_rel_3d, guess_intention[:,:,3:6], guess_similarity[:,:,1].unsqueeze(-1)).unsqueeze(1)
+			next_vel_goal = self.calculate_future_vectors_recursive(mean_vel_3d, guess_intention[:,:,6:], guess_similarity[:,:,2].unsqueeze(-1)).unsqueeze(1)
 
 			# 保存当前时间步解码的结果
 			pred_var.append(guess_var)
 			pred_mean.append(guess_mean[:,:,2:4])
 			pred_intentions.append(guess_intention)
-			pred_simularities.append(guess_simularity)
+			pred_simularities.append(guess_similarity)
 			goal_mean.append(next_rel_goal[..., :2])  # 只取前两维 (x, y)
 
 			# 更新输入帧 (添加解码结果作为新的观测帧)
@@ -112,7 +112,7 @@ class StepweiseInitializer(nn.Module):
 
 			x_next = torch.cat([x_current[:, 1:], next_goal[..., :6]], dim=1)
 			intention = torch.cat([intention[:, 1:], guess_intention], dim=1)  # 更新意图
-			past_similarity = torch.cat([past_similarity[:, 1:], guess_simularity], dim=1)  # 更新相似性
+			past_similarity = torch.cat([past_similarity[:, 1:], guess_similarity], dim=1)  # 更新相似性
 			x_current = x_next  # 更新当前输入帧
 			
 

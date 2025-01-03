@@ -52,7 +52,6 @@ class VecIntInitializer(nn.Module):
 			past_similarity: batch size, t_p, 3
 		'''
 
-		x = x[:, :, :6]
 		mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
 		social_embed = self.social_encoder(x, mask)
 		social_embed = social_embed.squeeze(1)
@@ -85,7 +84,7 @@ class VecIntInitializer(nn.Module):
 		sample_3d = torch.cat((guess_var, torch.zeros_like(guess_var[:, :, :,:1])), dim=-1)
 		goal_var = self.calculate_future_vectors_recursive(sample_3d, guess_intention, guess_similarity)
 
-		refined_mode = self.m2m_refine_attn_layer(goal_var) # B, K, 128
+		refined_mode = self.m2m_refine_attn_layer(guess_intention) # B, K, 128
 		conc = self.to_conc(refined_mode).unsqueeze(-1) 
 		conc = 1.0 / (F.elu_(conc) + 1.0 + 0.02) # B, K, T, 1
 		prob = self.to_prob(refined_mode).squeeze(-1) # B, K
@@ -94,10 +93,12 @@ class VecIntInitializer(nn.Module):
 		best_intention = guess_intention[torch.arange(guess_intention.size(0), device=guess_intention.device), best_mode]
 		best_similarity = guess_similarity[torch.arange(guess_similarity.size(0), device=guess_similarity.device), best_mode]
 
+
 		mean_total = torch.cat((ego_mean_embed, social_embed), dim=-1)
 		guess_mean = self.mean_decoder(mean_total).contiguous().view(-1, self.fut_len, 2) # B, T, 2
 		guess_mean_3d = torch.cat((guess_mean, torch.zeros_like(guess_mean[:, :, :1])), dim=-1)
 		goal_mean = self.calculate_future_vectors_recursive(guess_mean_3d, best_intention, best_similarity)
+		# goal_mean = guess_mean_3d
 		
 		return {
 			'guess_var': guess_var,
@@ -110,6 +111,41 @@ class VecIntInitializer(nn.Module):
 			'conc': conc,
 			'prob': prob
 		}
+	
+	def calculate_future_vectors_matrix(self, x, intention, similarity):
+		"""
+		使用矩阵操作替代递归计算未来的 T 帧 b 向量。
+
+		参数:
+		x (torch.Tensor): 观测轨迹，形状为 (B, M, T, 3) 或 (B, T, 3)
+		intention (torch.Tensor): 意图向量，形状为 (B, M, T, 3) 或 (B, T, 3)
+		similarity (torch.Tensor): 相似度向量，形状为 (B, M, T, 1) 或 (B, T, 1)
+
+		返回:
+		torch.Tensor: 预测向量 b，形状为 (B, M, T, 3) 或 (B, T, 3)
+		"""
+		# 检查是否存在 M 维度
+		has_m_dim = x.dim() == 4
+
+		if has_m_dim:
+			B, M, T, _ = x.shape
+			a_all = x[:, :, :-1, :]  # 提取所有时间步的 a 向量，形状 (B, M, T-1, 3)
+		else:
+			B, T, _ = x.shape
+			a_all = x[:, :-1, :]  # 提取所有时间步的 a 向量，形状 (B, T-1, 3)
+
+		# 提取 c 和 d 的所有时间步
+		c_all = intention[:, :, 1:, :] if has_m_dim else intention[:, 1:, :]
+		d_all = similarity[:, :, 1:, :] if has_m_dim else similarity[:, 1:, :]
+
+		# 使用 solve_b_batch 批量计算 b 向量
+		b_all = self.solve_b_batch(a_all, c_all, d_all)
+
+		# 插入第 0 帧
+		first_frame = x[:, :, 0, :].unsqueeze(2 if has_m_dim else 1) if has_m_dim else x[:, 0, :].unsqueeze(1)
+		future_vectors = torch.cat([first_frame, b_all], dim=2 if has_m_dim else 1)  # 拼接结果
+
+		return future_vectors
 	
 	def calculate_future_vectors_recursive(self, x, intention, similarity):
 		"""
@@ -159,23 +195,26 @@ class VecIntInitializer(nn.Module):
 
 		return future_vectors
 
-
-
 	def solve_b_batch(self, a, c, d):
 		"""
-		批量计算 b 向量，优化的版本使用矩阵运算避免逐个样本的计算。
-		
+		完全向量化版本，用于批量计算 b 向量。
+
 		参数:
 		a (torch.Tensor): 向量 a，形状为 (B, M, T, 3)
-		c (torch.Tensor): 向量 a 叉乘 b 的结果 c，形状为 (B, M, T, 3)
-		d (torch.Tensor): 向量 a 点乘 b 的结果 d，形状为 (B, M, T, 1)
-		
+		c (torch.Tensor): 向量 c，形状为 (B, M, T, 3)
+		d (torch.Tensor): 向量 d，形状为 (B, M, T, 1)
+
 		返回:
 		torch.Tensor: 向量 b，形状为 (B, M, T, 3)
 		"""
-		# 计算向量 a 和 c 的模长
+		# 计算 a 和 c 的模长
 		a_norm = torch.norm(a, dim=-1, keepdim=True)  # (B, M, T, 1)
 		c_norm = torch.norm(c, dim=-1, keepdim=True)  # (B, M, T, 1)
+
+		# 避免除以零
+		eps = 1e-8
+		a_norm = torch.clamp(a_norm, min=eps)
+		c_norm = torch.clamp(c_norm, min=eps)
 
 		# 计算 b 的模长
 		b_norm = torch.sqrt(c_norm**2 + d**2) / a_norm  # (B, M, T, 1)
@@ -183,7 +222,7 @@ class VecIntInitializer(nn.Module):
 		# 计算叉积方向
 		b_direction = torch.cross(a, c, dim=-1)  # (B, M, T, 3)
 		b_direction_norm = torch.norm(b_direction, dim=-1, keepdim=True)  # (B, M, T, 1)
-		b_direction = b_direction / b_direction_norm  # 归一化方向，(B, M, T, 3)
+		b_direction = b_direction / torch.clamp(b_direction_norm, min=eps)  # 归一化方向，(B, M, T, 3)
 
 		# 批量计算 b 向量
 		b = b_norm * b_direction  # (B, M, T, 3)

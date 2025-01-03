@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from models.layers import MLP, social_transformer, st_encoder, simularity_encoder, simularity_social_transformer, intention_social_transformer, intention_encoder
+from models.layers import MLP, social_transformer, st_encoder, similarity_encoder, similarity_social_transformer, intention_social_transformer, intention_encoder
 from scipy.spatial.transform import Rotation as R
 
 class VecIntInitializer(nn.Module):
@@ -25,12 +25,12 @@ class VecIntInitializer(nn.Module):
 
 		self.social_encoder = social_transformer(t_h)
 		self.intention_social_encoder = intention_social_transformer(t_h)
-		self.simularity_social_encoder = simularity_social_transformer(t_h)
+		self.similarity_social_encoder = similarity_social_transformer(t_h)
 		self.ego_var_encoder = st_encoder()
 		self.ego_mean_encoder = st_encoder()
 		self.ego_scale_encoder = st_encoder()
 		self.ego_intention_encoder = intention_encoder()
-		self.ego_simularity_encoder = simularity_encoder()
+		self.ego_similarity_encoder = similarity_encoder()
 
 		self.scale_encoder = MLP(1, 32, hid_feat=(4, 16), activation=nn.ReLU())
 
@@ -38,7 +38,7 @@ class VecIntInitializer(nn.Module):
 		self.mean_decoder = MLP(256*2, t_f * d_f, hid_feat=(256, 128), activation=nn.ReLU())
 		self.scale_decoder = MLP(256*2, 1, hid_feat=(256, 128), activation=nn.ReLU())
 		self.intention_decoder = MLP(256*2, self.intention_dim, hid_feat=(256, 128), activation=nn.ReLU())
-		self.simularity_decoder = MLP(256*2, self.angel_dim, hid_feat=(256, 128), activation=nn.ReLU())
+		self.similarity_decoder = MLP(256*2, self.angel_dim, hid_feat=(256, 128), activation=nn.ReLU())
 
 	
 	def forward(self, x, intention, past_similarity, mask=None):
@@ -54,22 +54,22 @@ class VecIntInitializer(nn.Module):
 		social_embed = social_embed.squeeze(1)
 		intention_social_embed = self.intention_social_encoder(intention, mask)
 		intention_social_embed = intention_social_embed.squeeze(1)
-		simularity_social_embed = self.simularity_social_encoder(past_similarity, mask)
-		simularity_social_embed = simularity_social_embed.squeeze(1)
+		similarity_social_embed = self.similarity_social_encoder(past_similarity, mask)
+		similarity_social_embed = similarity_social_embed.squeeze(1)
 		# B, 256
 		
 		ego_var_embed = self.ego_var_encoder(x)
 		ego_mean_embed = self.ego_mean_encoder(x)
 		ego_scale_embed = self.ego_scale_encoder(x)
 		ego_intention_embed = self.ego_intention_encoder(intention)
-		ego_simularity_embed = self.ego_simularity_encoder(past_similarity)
+		ego_similarity_embed = self.ego_similarity_encoder(past_similarity)
 		
 		# B, 256
 		intention_total = torch.cat((ego_intention_embed, intention_social_embed), dim=-1)
-		guess_intention = self.intention_decoder(intention_total).reshape(x.size(0), self.n, self.fut_len, 3) # B, T, 3
+		guess_intention = self.intention_decoder(intention_total).reshape(x.size(0), self.n, self.fut_len, 3) # B, K, T, 3
 		
-		simularity_total = torch.cat((ego_simularity_embed, simularity_social_embed), dim=-1)
-		guess_simularity = self.simularity_decoder(simularity_total).reshape(x.size(0), self.n, self.fut_len, 1) # B, T, 1
+		similarity_total = torch.cat((ego_similarity_embed, similarity_social_embed), dim=-1)
+		guess_similarity = self.similarity_decoder(similarity_total).reshape(x.size(0), self.n, self.fut_len, 1) # B, K, T, 1
 		
 
 		mean_total = torch.cat((ego_mean_embed, social_embed), dim=-1)
@@ -83,10 +83,10 @@ class VecIntInitializer(nn.Module):
 		guess_var = self.var_decoder(var_total).reshape(x.size(0), self.n, self.fut_len, 2) # B, K, T, 2
 
 		sample_3d = torch.cat((guess_var, torch.zeros_like(guess_var[:, :, :,:1])), dim=-1)
-		goal_sample = self.calculate_future_vectors_recursive(sample_3d, guess_intention, guess_simularity)
+		goal_sample = self.calculate_future_vectors_recursive(sample_3d, guess_intention, guess_similarity) # B, K, T, 3
 
 
-		return guess_var, guess_mean, guess_scale, guess_intention, guess_simularity, goal_sample[..., :2]
+		return guess_var, guess_mean, guess_scale, guess_intention, guess_similarity, goal_sample[..., :2]
 	
 	def calculate_future_vectors_recursive(self, x, intention, similarity):
 		"""
@@ -127,23 +127,57 @@ class VecIntInitializer(nn.Module):
 		future_vectors = torch.cat([x[:, :, 0, :].unsqueeze(2), future_vectors], dim=2)  # 形状为 (B, M, T, 3)
 		
 		return future_vectors
+	
 
+	# def solve_b_batch(self, a, c, d):
+	# 	"""
+	# 	批量计算 b 向量，优化的版本使用矩阵运算避免逐个样本的计算。
+		
+	# 	参数:
+	# 	a (torch.Tensor): 向量 a，形状为 (B, M, T, 3)
+	# 	c (torch.Tensor): 向量 a 叉乘 b 的结果 c，形状为 (B, M, T, 3)
+	# 	d (torch.Tensor): 向量 a 点乘 b 的结果 d，形状为 (B, M, T, 1)
+		
+	# 	返回:
+	# 	torch.Tensor: 向量 b，形状为 (B, M, T, 3)
+	# 	"""
+	# 	# 计算向量 a 和 c 的模长
+	# 	a_norm = torch.norm(a, dim=-1, keepdim=True)  # (B, M, T, 1)
+	# 	c_norm = torch.norm(c, dim=-1, keepdim=True)  # (B, M, T, 1)
 
+	# 	# 计算 b 的模长
+	# 	b_norm = torch.sqrt(c_norm**2 + d**2) / a_norm  # (B, M, T, 1)
+
+	# 	# 计算叉积方向
+	# 	b_direction = torch.cross(a, c, dim=-1)  # (B, M, T, 3)
+	# 	b_direction_norm = torch.norm(b_direction, dim=-1, keepdim=True)  # (B, M, T, 1)
+	# 	b_direction = b_direction / b_direction_norm  # 归一化方向，(B, M, T, 3)
+
+	# 	# 批量计算 b 向量
+	# 	b = b_norm * b_direction  # (B, M, T, 3)
+
+	# 	return b
+	
 	def solve_b_batch(self, a, c, d):
 		"""
-		批量计算 b 向量，优化的版本使用矩阵运算避免逐个样本的计算。
-		
+		完全向量化版本，用于批量计算 b 向量。
+
 		参数:
 		a (torch.Tensor): 向量 a，形状为 (B, M, T, 3)
-		c (torch.Tensor): 向量 a 叉乘 b 的结果 c，形状为 (B, M, T, 3)
-		d (torch.Tensor): 向量 a 点乘 b 的结果 d，形状为 (B, M, T, 1)
-		
+		c (torch.Tensor): 向量 c，形状为 (B, M, T, 3)
+		d (torch.Tensor): 向量 d，形状为 (B, M, T, 1)
+
 		返回:
 		torch.Tensor: 向量 b，形状为 (B, M, T, 3)
 		"""
-		# 计算向量 a 和 c 的模长
+		# 计算 a 和 c 的模长
 		a_norm = torch.norm(a, dim=-1, keepdim=True)  # (B, M, T, 1)
 		c_norm = torch.norm(c, dim=-1, keepdim=True)  # (B, M, T, 1)
+
+		# 避免除以零
+		eps = 1e-8
+		a_norm = torch.clamp(a_norm, min=eps)
+		c_norm = torch.clamp(c_norm, min=eps)
 
 		# 计算 b 的模长
 		b_norm = torch.sqrt(c_norm**2 + d**2) / a_norm  # (B, M, T, 1)
@@ -151,7 +185,7 @@ class VecIntInitializer(nn.Module):
 		# 计算叉积方向
 		b_direction = torch.cross(a, c, dim=-1)  # (B, M, T, 3)
 		b_direction_norm = torch.norm(b_direction, dim=-1, keepdim=True)  # (B, M, T, 1)
-		b_direction = b_direction / b_direction_norm  # 归一化方向，(B, M, T, 3)
+		b_direction = b_direction / torch.clamp(b_direction_norm, min=eps)  # 归一化方向，(B, M, T, 3)
 
 		# 批量计算 b 向量
 		b = b_norm * b_direction  # (B, M, T, 3)
