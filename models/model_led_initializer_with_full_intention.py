@@ -84,7 +84,7 @@ class VecIntInitializer(nn.Module):
 		sample_3d = torch.cat((guess_var, torch.zeros_like(guess_var[:, :, :,:1])), dim=-1)
 		goal_var = self.calculate_future_vectors_recursive(sample_3d, guess_intention, guess_similarity)
 
-		refined_mode = self.m2m_refine_attn_layer(guess_intention) # B, K, 128
+		refined_mode = self.m2m_refine_attn_layer(goal_var) # B, K, 128
 		conc = self.to_conc(refined_mode).unsqueeze(-1) 
 		conc = 1.0 / (F.elu_(conc) + 1.0 + 0.02) # B, K, T, 1
 		prob = self.to_prob(refined_mode).squeeze(-1) # B, K

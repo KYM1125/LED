@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from models.layers import MLP, social_transformer, st_encoder, simularity_encoder, simularity_social_transformer, intention_social_transformer, intention_encoder
+from models.layers import MLP, social_transformer, st_encoder, similarity_encoder, similarity_social_transformer, intention_social_transformer, intention_encoder, stepwise_encoder
 from scipy.spatial.transform import Rotation as R
 
 class VecIntInitializer(nn.Module):
@@ -25,12 +25,12 @@ class VecIntInitializer(nn.Module):
 
 		self.social_encoder = social_transformer(t_h)
 		self.intention_social_encoder = intention_social_transformer(t_h)
-		self.simularity_social_encoder = simularity_social_transformer(t_h)
-		self.ego_var_encoder = st_encoder()
-		self.ego_mean_encoder = st_encoder()
-		self.ego_scale_encoder = st_encoder()
-		self.ego_intention_encoder = intention_encoder()
-		self.ego_simularity_encoder = simularity_encoder()
+		self.similarity_social_encoder = similarity_social_transformer(t_h)
+		self.ego_var_encoder = stepwise_encoder(d_h, t_h, t_f)
+		self.ego_mean_encoder = stepwise_encoder(d_h, t_h, t_f)
+		self.ego_scale_encoder = stepwise_encoder(d_h, t_h, t_f)
+		self.ego_intention_encoder = stepwise_encoder(9, t_h, t_f)
+		self.ego_similarity_encoder = stepwise_encoder(3, t_h, t_f)
 
 		self.scale_encoder = MLP(1, 32, hid_feat=(4, 16), activation=nn.ReLU())
 
@@ -38,7 +38,7 @@ class VecIntInitializer(nn.Module):
 		self.mean_decoder = MLP(256*2, t_f * d_f, hid_feat=(256, 128), activation=nn.ReLU())
 		self.scale_decoder = MLP(256*2, 1, hid_feat=(256, 128), activation=nn.ReLU())
 		self.intention_decoder = MLP(256*2, t_f * 3, hid_feat=(256, 128), activation=nn.ReLU())
-		self.simularity_decoder = MLP(256*2, t_f * 1, hid_feat=(256, 128), activation=nn.ReLU())
+		self.similarity_decoder = MLP(256*2, t_f * 1, hid_feat=(256, 128), activation=nn.ReLU())
 
 	
 	def forward(self, x, intention, past_similarity, mask=None):
@@ -54,27 +54,27 @@ class VecIntInitializer(nn.Module):
 		social_embed = social_embed.squeeze(1)
 		intention_social_embed = self.intention_social_encoder(intention, mask)
 		intention_social_embed = intention_social_embed.squeeze(1)
-		simularity_social_embed = self.simularity_social_encoder(past_similarity, mask)
-		simularity_social_embed = simularity_social_embed.squeeze(1)
+		similarity_social_embed = self.similarity_social_encoder(past_similarity, mask)
+		similarity_social_embed = similarity_social_embed.squeeze(1)
 		# B, 256
 		
 		ego_var_embed = self.ego_var_encoder(x)
 		ego_mean_embed = self.ego_mean_encoder(x)
 		ego_scale_embed = self.ego_scale_encoder(x)
 		ego_intention_embed = self.ego_intention_encoder(intention)
-		ego_simularity_embed = self.ego_simularity_encoder(past_similarity)
+		ego_similarity_embed = self.ego_similarity_encoder(past_similarity)
 		
 		# B, 256
 		intention_total = torch.cat((ego_intention_embed, intention_social_embed), dim=-1)
 		guess_intention = self.intention_decoder(intention_total).contiguous().view(-1, self.fut_len, 3) # B, T, 3
 		
-		simularity_total = torch.cat((ego_simularity_embed, simularity_social_embed), dim=-1)
-		guess_simularity = self.simularity_decoder(simularity_total).contiguous().view(-1, self.fut_len, 1) # B, T, 1
+		similarity_total = torch.cat((ego_similarity_embed, similarity_social_embed), dim=-1)
+		guess_similarity = self.similarity_decoder(similarity_total).contiguous().view(-1, self.fut_len, 1) # B, T, 1
 		
 		mean_total = torch.cat((ego_mean_embed, social_embed), dim=-1)
 		guess_mean = self.mean_decoder(mean_total).contiguous().view(-1, self.fut_len, 2) # B, T, 2
 		guess_mean_3d = torch.cat((guess_mean, torch.zeros_like(guess_mean[:, :, :1])), dim=-1)
-		goal_sample = self.calculate_future_vectors_recursive(guess_mean_3d, guess_intention, guess_simularity)
+		goal_sample = self.calculate_future_vectors_recursive(guess_mean_3d, guess_intention, guess_similarity)
 		
 		scale_total = torch.cat((ego_scale_embed, social_embed), dim=-1)
 		guess_scale = self.scale_decoder(scale_total) # B, 1
@@ -83,7 +83,7 @@ class VecIntInitializer(nn.Module):
 		var_total = torch.cat((ego_var_embed, social_embed, guess_scale_feat), dim=-1) 
 		guess_var = self.var_decoder(var_total).contiguous().view(x.size(0), self.n, self.fut_len, 2) # B, K, T, 2
 
-		return guess_var, guess_mean, guess_scale, guess_intention, guess_simularity, goal_sample[..., :2]
+		return guess_var, guess_mean, guess_scale, guess_intention, guess_similarity, goal_sample[..., :2]
 	
 	def calculate_future_vectors_recursive(self, x, intention, similarity):
 		"""

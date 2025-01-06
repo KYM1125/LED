@@ -188,8 +188,88 @@ class intention_social_transformer(nn.Module):
 		h_feat = h_feat + h_feat_
 
 		return h_feat
+	
+	
+class stepwise_encoder(nn.Module):
+	def __init__(self, hidden_dim=6, t_past=10, t_future=20):
+		super(stepwise_encoder, self).__init__()
+		self.t_future = t_future
+		self.gru_hidden_dim=256
+		self.mask = torch.tril(torch.ones(t_past, t_past), diagonal=0)  # 下三角矩阵
+		self.internal_gru = nn.GRU(input_size=hidden_dim, hidden_size=self.gru_hidden_dim, batch_first=True)
+		self.final_gru = nn.GRU(input_size=self.gru_hidden_dim, hidden_size=self.gru_hidden_dim, batch_first=True)
+		# self.multihead_attn = nn.MultiheadAttention(embed_dim=self.gru_hidden_dim, num_heads=2)
 
+		self.relu = nn.ReLU()
 
+		self.reset_parameters()
+
+	def reset_parameters(self):
+		# 初始化 internal_gru 的参数
+		nn.init.kaiming_normal_(self.internal_gru.weight_ih_l0)  # 输入权重
+		nn.init.orthogonal_(self.internal_gru.weight_hh_l0)  # 隐藏权重
+		nn.init.zeros_(self.internal_gru.bias_ih_l0)  # 输入偏置
+		nn.init.zeros_(self.internal_gru.bias_hh_l0)  # 隐藏偏置
+
+		# 初始化 final_gru 的参数
+		nn.init.kaiming_normal_(self.final_gru.weight_ih_l0)
+		nn.init.orthogonal_(self.final_gru.weight_hh_l0)
+		nn.init.zeros_(self.final_gru.bias_ih_l0)
+		nn.init.zeros_(self.final_gru.bias_hh_l0)
+
+	def forward(self, X):
+		'''
+		X: b, T, 6
+
+		return: b, F
+		'''
+		batch_size, t_past, hidden_dim = X.size()
+		device = X.device
+		mask = self.mask.unsqueeze(0).unsqueeze(-1).to(device)                   # 扩展为 (1, t_past, t_past, 1)
+		mask = mask.expand(batch_size, t_past, t_past, hidden_dim)         # 扩展为 (B, t_past, t_past, 6)
+
+		# 应用掩码
+		masked_x = mask * X.unsqueeze(1)  # 广播并应用掩码，(B, t_past, t_past, 6)
+		# 内部 GRU 编码
+		masked_x_flat = masked_x.reshape(batch_size * t_past, t_past, hidden_dim)
+		internal_encoded_output, _ = self.internal_gru(masked_x_flat)  # 输出形状 (B * t_past, t_past, gru_hidden_dim)
+		internal_encoded_output = internal_encoded_output[:,-1,:] # (B * t_past, t_past, gru_hidden_dim) -> (B * t_past, gru_hidden_dim)
+
+		# 还原到 (B, t_past, gru_hidden_dim)
+		internal_encoded_output = internal_encoded_output.reshape(batch_size, t_past, self.gru_hidden_dim)
+
+		# internal_encoded_output_reshaped = internal_encoded_output.permute(1, 0, 2)  # (t_past, B, gru_hidden_dim)
+		# # 自注意力机制
+		# attn_output, attn_weights = self.multihead_attn(
+		# 	internal_encoded_output_reshaped,  # query
+		# 	internal_encoded_output_reshaped,  # key
+		# 	internal_encoded_output_reshaped   # value
+		# )
+		# attn_output = attn_output.permute(1, 0, 2)  # (B, t_past, gru_hidden_dim)
+		# attn_output = internal_encoded_output + attn_output  # (B, t_past, gru_hidden_dim)
+		# 最终 GRU 编码
+		# 沿 t_past 维度串联
+		final_output, _ = self.final_gru(internal_encoded_output)  # (B, t_past, gru_hidden_dim)
+		final_output = final_output[:, -1, :]  # (B, gru_hidden_dim)
+
+		return final_output
+	
+class stepweise_transformer(nn.Module):
+	def __init__(self):
+		super(stepweise_transformer, self).__init__()
+		self.layer = nn.TransformerEncoderLayer(d_model=256, nhead=2, dim_feedforward=256)
+		self.transformer_encoder = nn.TransformerEncoder(self.layer, num_layers=2)
+
+	def forward(self, stepwise_feat, mask):
+		'''
+		stepwise_feat: batch_size, 256
+		'''
+		stepwise_feat = stepwise_feat.unsqueeze(1)
+		h_feat_ = self.transformer_encoder(stepwise_feat, mask)
+		h_feat = stepwise_feat + h_feat_
+
+		return h_feat
+	
 class st_encoder(nn.Module):
 	def __init__(self):
 		super().__init__()
