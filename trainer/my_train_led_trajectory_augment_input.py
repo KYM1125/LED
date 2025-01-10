@@ -14,8 +14,7 @@ from utils.utils import print_log
 
 from torch.utils.data import DataLoader
 from data.dataloader_nba import NBADataset, seq_collate
-import matplotlib.pyplot as plt
-from IPython.display import Image, display
+
 from torch.utils.tensorboard import SummaryWriter
 
 from models.model_led_initializer import LEDInitializer as InitializationModel
@@ -116,39 +115,6 @@ class Trainer:
 		trainable_num = sum(p.numel() for p in model.parameters() if p.requires_grad)
 		print_log("[{}] Trainable/Total: {}/{}".format(name, trainable_num, total_num), self.log)
 		return None
-	
-	def plot_angle_comparison_to_tensorboard(self, angel_estimation, target_angel, step, title='Angle Comparison'):
-		"""
-		绘制 angle_estimation 和 target_angel 的变化曲线，并将图像保存到 TensorBoard 中。
-
-		:param angel_estimation: 模型预测的角度 (B, T)
-		:param target_angel: 真实角度 (B, T)
-		:param step: 当前训练步骤，作为 TensorBoard 的全局步骤
-		:param title: 图表标题
-		"""
-		# 将角度从弧度转换为度数
-		angel_estimation_deg = torch.rad2deg(angel_estimation.detach()).cpu().numpy()  # 使用 detach()
-		target_angel_deg = torch.rad2deg(target_angel.detach()).cpu().numpy()  # 使用 detach()
-
-		# 设置画布
-		plt.figure(figsize=(10, 6))
-
-		# 绘制预测角度和真实角度
-		plt.plot(angel_estimation_deg[0], label='Predicted Angle', color='blue', linestyle='--')
-		plt.plot(target_angel_deg[0], label='True Angle', color='red', linestyle='-')
-
-		# 添加图例和标题
-		plt.legend()
-		plt.title(title)
-		plt.xlabel('Time Step')
-		plt.ylabel('Angle (degrees)')
-		plt.grid(True)
-
-		# 将图像写入 TensorBoard
-		writer.add_figure('Angle Comparison', plt.gcf(), global_step=step)
-
-		# 清理当前图形，以防影响后续绘图
-		plt.close()
 
 	def make_beta_schedule(self, schedule: str = 'linear', 
 			n_timesteps: int = 1000, 
@@ -335,20 +301,23 @@ class Trainer:
 				if (epoch + 1) % self.cfg.test_interval == 0:
 					performance, samples, goal_samples = self._test_single_epoch()
 					for time_i in range(4):
-						ade = performance['ADE'][time_i] / samples
-						fde = performance['FDE'][time_i] / samples
+						# ade = performance['ADE'][time_i] / samples
+						# fde = performance['FDE'][time_i] / samples
 						goal_ade = performance['goal_ADE'][time_i] / goal_samples
 						goal_fde = performance['goal_FDE'][time_i] / goal_samples
 
-						ade_reduction = ((ade - goal_ade) / ade) * 100  # Correct formula
-						fde_reduction = ((fde - goal_fde) / fde) * 100
+						# ade_reduction = ((ade - goal_ade) / ade) * 100  # Correct formula
+						# fde_reduction = ((fde - goal_fde) / fde) * 100
 
 						# Log test results
-						print_log('--ADE({}s): {:.4f}\t--FDE({}s): {:.4f}\t--Goal ADE({}s): {:.4f} (下降 {:.2f}%)\t--Goal FDE({}s): {:.4f} (下降 {:.2f}%)'.format(
-							time_i + 1, ade,
-							time_i + 1, fde,
-							time_i + 1, goal_ade, ade_reduction,
-							time_i + 1, goal_fde, fde_reduction), self.log)
+						# print_log('--ADE({}s): {:.4f}\t--FDE({}s): {:.4f}\t--Goal ADE({}s): {:.4f} (下降 {:.2f}%)\t--Goal FDE({}s): {:.4f} (下降 {:.2f}%)'.format(
+						# 	time_i + 1, ade,
+						# 	time_i + 1, fde,
+						# 	time_i + 1, goal_ade, ade_reduction,
+						# 	time_i + 1, goal_fde, fde_reduction), self.log)
+						print_log('-Goal ADE({}s): {:.4f} \t--Goal FDE({}s): {:.4f} '.format(
+							time_i + 1, goal_ade,
+							time_i + 1, goal_fde), self.log)
 
 					# Save the model checkpoint
 					cp_path = self.cfg.model_path % (epoch + 1)
@@ -383,58 +352,63 @@ class Trainer:
 		past_traj_abs = ((data['pre_motion_3D'].cuda() - self.traj_mean)/self.traj_scale).contiguous().view(-1, 10, 2)
 		past_traj_rel = ((data['pre_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 10, 2) # initial_pos是观测帧与预测帧的交叉点，是观测帧的最后一帧
 		past_traj_vel = torch.cat((past_traj_rel[:, 1:] - past_traj_rel[:, :-1], torch.zeros_like(past_traj_rel[:, -1:])), dim=1)
-		past_traj_acc = torch.cat((past_traj_vel[:, 1:] - past_traj_vel[:, :-1], torch.zeros_like(past_traj_vel[:, -1:])), dim=1) # 后一帧减去前一帧，得到加速度
-		
-		past_traj_pos_angle = torch.atan2(past_traj_rel[..., 1], past_traj_rel[..., 0])
-		past_traj_vel_angle = torch.atan2(past_traj_vel[..., 1], past_traj_vel[..., 0])
-		past_traj_acc_angle = torch.atan2(past_traj_acc[..., 1], past_traj_acc[..., 0]) # 相对于x轴的逆时针夹角，单位为弧度。
-		
-		position_angle_change = torch.cat((past_traj_pos_angle[:, 1:] - past_traj_pos_angle[:, :-1], torch.zeros_like(past_traj_pos_angle[:, -1:])), dim=1).unsqueeze(-1)
-		velocity_angle_change = torch.cat((past_traj_vel_angle[:, 1:] - past_traj_vel_angle[:, :-1], torch.zeros_like(past_traj_vel_angle[:, -1:])), dim=1).unsqueeze(-1)
-		acceleration_angle_change = torch.cat((past_traj_acc_angle[:, 1:] - past_traj_acc_angle[:, :-1], torch.zeros_like(past_traj_acc_angle[:, -1:])), dim=1).unsqueeze(-1)
-		
+
 		past_traj_abs_3d = torch.cat((past_traj_abs, torch.zeros_like(past_traj_abs[..., :1])), dim=-1)
 		past_traj_rel_3d = torch.cat((past_traj_rel, torch.zeros_like(past_traj_rel[..., :1])), dim=-1)
 		past_traj_vel_3d = torch.cat((past_traj_vel, torch.zeros_like(past_traj_vel[..., :1])), dim=-1)
 
-		past_traj_similarity_abs = torch.sum(past_traj_abs_3d[:, :-1] * past_traj_abs_3d[:, 1:], dim=-1)
-		past_traj_similarity_rel = torch.sum(past_traj_rel_3d[:, :-1] * past_traj_rel_3d[:, 1:], dim=-1)
-		past_traj_similarity_vel = torch.sum(past_traj_vel_3d[:, :-1] * past_traj_vel_3d[:, 1:], dim=-1)
-		past_traj_similarity_abs = torch.cat((past_traj_similarity_abs, torch.zeros_like(past_traj_similarity_abs[:, -1:])), dim=1).unsqueeze(-1)
-		past_traj_similarity_rel = torch.cat((past_traj_similarity_rel, torch.zeros_like(past_traj_similarity_rel[:, -1:])), dim=1).unsqueeze(-1)
-		past_traj_similarity_vel = torch.cat((past_traj_similarity_vel, torch.zeros_like(past_traj_similarity_vel[:, -1:])), dim=1).unsqueeze(-1)
+		past_abs_next = torch.zeros_like(past_traj_abs_3d)
+		past_abs_next[:, :-1, :] = past_traj_abs_3d[:, 1:, :] 
+		past_rel_next = torch.zeros_like(past_traj_rel_3d)
+		past_rel_next[:, :-1, :] = past_traj_rel_3d[:, 1:, :]
+		past_vel_next = torch.zeros_like(past_traj_vel_3d)
+		past_vel_next[:, :-1, :] = past_traj_vel_3d[:, 1:, :]
 
-		
-		past_traj_intention_abs = torch.cross(past_traj_abs_3d[:, :-1], past_traj_abs_3d[:, 1:], dim=-1) # 当前帧叉乘下一帧
-		past_traj_intention = torch.cross(past_traj_rel_3d[:, :-1], past_traj_rel_3d[:, 1:], dim=-1) 
-		past_traj_intention_vel = torch.cross(past_traj_vel_3d[:, :-1], past_traj_vel_3d[:, 1:], dim=-1)
-		past_traj_intention_abs = torch.cat((past_traj_intention_abs, torch.zeros_like(past_traj_intention_abs[:, -1:, :])), dim=1)
-		past_traj_intention = torch.cat((past_traj_intention, torch.zeros_like(past_traj_intention[:, -1:, :])), dim=1)
-		past_traj_intention_vel = torch.cat((past_traj_intention_vel, torch.zeros_like(past_traj_intention_vel[:, -1:, :])), dim=1)
+		past_traj_similarity_abs = torch.sum(past_traj_abs_3d * past_abs_next, dim=-1).unsqueeze(-1)
+		past_traj_similarity_rel = torch.sum(past_traj_rel_3d * past_rel_next, dim=-1).unsqueeze(-1)
+		past_traj_similarity_vel = torch.sum(past_traj_vel_3d * past_vel_next, dim=-1).unsqueeze(-1)
+
+		past_traj_intention_abs = torch.cross(past_traj_abs_3d, past_abs_next, dim=-1) # 当前帧叉乘下一帧
+		past_traj_intention = torch.cross(past_traj_rel_3d, past_rel_next, dim=-1) 
+		past_traj_intention_vel = torch.cross(past_traj_vel_3d, past_vel_next, dim=-1)
+
+		# # 避免 a 的模长为零
+		# eps = 1e-8
+		# a_dot_a = torch.sum(past_traj_vel_3d * past_traj_vel_3d, dim=-1, keepdim=True)
+		# a_dot_a = torch.clamp(a_dot_a, min=eps)  # 防止除零
+
+		# # 计算 λ 和垂直分量
+		# lambda_ = past_traj_similarity_vel / a_dot_a
+		# b_perpendicular = torch.cross(past_traj_intention_vel, past_traj_vel_3d, dim=-1) / a_dot_a
+
+		# # 合成 b 向量
+		# b_calculated = lambda_ * past_traj_vel_3d + b_perpendicular
+		# b_calculated = torch.cat([past_traj_vel_3d[:, 0:1, :], b_calculated[:, :-1, :]], dim=1)
 
 		past_traj = torch.cat((past_traj_abs, past_traj_rel, past_traj_vel), dim=-1)
 		past_similarity = torch.cat((past_traj_similarity_abs, past_traj_similarity_rel, past_traj_similarity_vel), dim=-1)
 		past_intention = torch.cat((past_traj_intention_abs, past_traj_intention, past_traj_intention_vel), dim=-1)
 
-		fut_traj_abs = ((data['fut_motion_3D'].cuda() - self.traj_mean)/self.traj_scale).contiguous().view(-1, 20, 2)
 		fut_traj_rel = ((data['fut_motion_3D'].cuda() - initial_pos)/self.traj_scale).contiguous().view(-1, 20, 2)
-		fut_traj_vel = torch.cat((fut_traj_rel[:, 1:] - fut_traj_rel[:, :-1], torch.zeros_like(fut_traj_rel[:, -1:])), dim=1)
-		fut_traj_acc = torch.cat((fut_traj_vel[:, 1:] - fut_traj_vel[:, :-1], torch.zeros_like(fut_traj_vel[:, -1:])), dim=1)
-		
-		fut_traj_pos_angle = torch.atan2(fut_traj_rel[..., 1], fut_traj_rel[..., 0])
-		fut_traj_vel_angle = torch.atan2(fut_traj_vel[..., 1], fut_traj_vel[..., 0])
-		fut_traj_acc_angle = torch.atan2(fut_traj_acc[..., 1], fut_traj_acc[..., 0])
-		
-		position_angle_change_fut = torch.cat((fut_traj_pos_angle[:, 1:] - fut_traj_pos_angle[:, :-1], torch.zeros_like(fut_traj_pos_angle[:, -1:])), dim=1).unsqueeze(-1)
-		velocity_angle_change_fut = torch.cat((fut_traj_vel_angle[:, 1:] - fut_traj_vel_angle[:, :-1], torch.zeros_like(fut_traj_vel_angle[:, -1:])), dim=1).unsqueeze(-1)
-		acceleration_angle_change_fut = torch.cat((fut_traj_acc_angle[:, 1:] - fut_traj_acc_angle[:, :-1], torch.zeros_like(fut_traj_acc_angle[:, -1:])), dim=1).unsqueeze(-1)
-		
 		fut_traj_rel_3d = torch.cat((fut_traj_rel, torch.zeros_like(fut_traj_rel[..., :1])), dim=-1)
-		fut_similarity = torch.sum(fut_traj_rel_3d[:, :-1] * fut_traj_rel_3d[:, 1:], dim=-1).unsqueeze(-1) # 当前帧点乘下一帧
-		fut_similarity = torch.cat((fut_similarity, torch.zeros_like(fut_similarity[:, -1:, :])), dim=1)
-		fut_intention = torch.cross(fut_traj_rel_3d[:, :-1], fut_traj_rel_3d[:, 1:], dim=-1) # 当前帧叉乘下一帧
-		fut_intention = torch.cat((fut_intention, torch.zeros_like(fut_intention[:, -1:, :])), dim=1)
-		
+		fut_traj_next = torch.zeros_like(fut_traj_rel_3d)
+		fut_traj_next[:, :-1, :] = fut_traj_rel_3d[:, 1:, :]
+		fut_similarity = torch.sum(fut_traj_rel_3d * fut_traj_next, dim=-1).unsqueeze(-1)
+		fut_intention = torch.cross(fut_traj_rel_3d, fut_traj_next, dim=-1)
+
+		# # 避免 a 的模长为零
+		# eps = 1e-8
+		# a_dot_a = torch.sum(fut_traj_rel_3d * fut_traj_rel_3d, dim=-1, keepdim=True)
+		# a_dot_a = torch.clamp(a_dot_a, min=eps)  # 防止除零
+
+		# # 计算 λ 和垂直分量
+		# lambda_ = fut_similarity / a_dot_a
+		# b_perpendicular = torch.cross(fut_intention, fut_traj_rel_3d, dim=-1) / a_dot_a
+
+		# # 合成 b 向量
+		# b_calculated = lambda_ * fut_traj_rel_3d + b_perpendicular
+		# b_calculated = torch.cat([fut_traj_rel_3d[:, 0:1, :], b_calculated[:, :-1, :]], dim=1)
+
 		fut_traj = torch.cat((fut_traj_rel, fut_similarity, fut_intention), dim=-1)
 		return batch_size, traj_mask, past_traj, fut_traj, past_intention, past_similarity,
 
@@ -455,10 +429,11 @@ class Trainer:
 		distance = torch.norm(intention_estimation[:,:,:-1,:] - target_intention_expanded[:,:,:-1,:], p=L, dim=-1)  # (B, M, T)
 		
 		# 计算每个时间步的损失：距离越小，损失越小
-		intention_loss = distance.mean(dim=1)  # 对每个模态取平均，得到 (B, T)
+		intention_loss = distance.min(dim=1)[0]  # 取最好的模态，得到 (B, T)
 
 		# 使用时间加权的损失
-		weighted_intention_loss = (intention_loss * self.temporal_reweight[:,:,:-1].squeeze(0)).mean()
+		# weighted_intention_loss = (intention_loss * self.temporal_reweight[:,:,:-1].squeeze(0)).mean()
+		weighted_intention_loss = intention_loss.mean()
 
 		return weighted_intention_loss
 
@@ -519,17 +494,17 @@ class Trainer:
 									+ 
 								variance_estimation
 								).mean()
-			# test = (generated_y - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1) 
-			loss_dist = (	(generated_y - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1) 
-								* 
-							 self.temporal_reweight
-						).mean(dim=-1).min(dim=1)[0].mean()
-			loss_uncertainty = (torch.exp(-variance_estimation)
-		       						*
-								(generated_y - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1).mean(dim=(1, 2)) 
-									+ 
-								variance_estimation
-								).mean()
+
+			# loss_dist = (	(generated_y - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1) 
+			# 					* 
+			# 				 self.temporal_reweight
+			# 			).mean(dim=-1).min(dim=1)[0].mean()
+			# loss_uncertainty = (torch.exp(-variance_estimation)
+		    #    						*
+			# 					(generated_y - fut_traj_xy.unsqueeze(dim=1)).norm(p=2, dim=-1).mean(dim=(1, 2)) 
+			# 						+ 
+			# 					variance_estimation
+			# 					).mean()
 			loss_intention = self.compute_intention_loss(intention_estimation, target_intention, 2) 
 			# loss_angel = self.compute_angle_cosine_loss(angel_estimation.squeeze(-1), target_angel)
 			# # 平均化M维度
@@ -542,12 +517,12 @@ class Trainer:
 			loss_similarity = self.compute_intention_loss(similarity_estimation, target_similarity, 1)
 
 
-			loss = loss_dist*50 + loss_uncertainty + loss_intention*10 + loss_similarity*10 + loss_goal_dist*50 + loss_goal_uncertainty
+			loss = loss_intention*10 + loss_similarity + loss_goal_dist*50 + loss_goal_uncertainty
 			loss_total += loss.item()
-			loss_dt += loss_dist.item()*50
-			loss_dc += loss_uncertainty.item()
+			# loss_dt += loss_dist.item()*50
+			# loss_dc += loss_uncertainty.item()
 			loss_it += loss_intention.item()*10
-			loss_sm += loss_similarity.item()*10
+			loss_sm += loss_similarity.item()
 			loss_goal_dt += loss_goal_dist.item()*50
 			loss_goal_dc += loss_goal_uncertainty.item()
 
@@ -631,7 +606,7 @@ class Trainer:
 		'''
 		Save the visualization data.
 		'''
-		model_path = './results/my_led_augment_debug/12_24_new_prototype_with_goal/models/model_0100.p'
+		model_path = './results/1_6_stepwise/model_0100.p'
 		model_dict = torch.load(model_path, map_location=torch.device('cpu'))['model_initializer_dict']
 		self.model_initializer.load_state_dict(model_dict)
 		def prepare_seed(rand_seed):
@@ -640,7 +615,7 @@ class Trainer:
 			torch.manual_seed(rand_seed)
 			torch.cuda.manual_seed_all(rand_seed)
 		prepare_seed(0)
-		root_path = './visualization/my_data/'
+		root_path = './visualization/1_6_stepwise_data/'
 				
 		with torch.no_grad():
 			for data in self.test_loader:

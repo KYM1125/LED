@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from models.layers import MLP, stepwise_encoder, stepweise_transformer, social_transformer
+from models.layers import MLP, stepwise_encoder, stepweise_transformer, social_transformer, st_encoder, similarity_encoder, intention_encoder
 from scipy.spatial.transform import Rotation as R
 
 class VecIntInitializer(nn.Module):
@@ -32,6 +32,11 @@ class VecIntInitializer(nn.Module):
 		self.ego_scale_encoder = stepwise_encoder(d_h, t_h, t_f)
 		self.ego_intention_encoder = stepwise_encoder(9, t_h, t_f)
 		self.ego_similarity_encoder = stepwise_encoder(3, t_h, t_f)
+		# self.ego_var_encoder = st_encoder()
+		# self.ego_mean_encoder = st_encoder()
+		# self.ego_scale_encoder = st_encoder()
+		# self.ego_intention_encoder = intention_encoder()
+		# self.ego_similarity_encoder = similarity_encoder()
 
 		self.scale_encoder = MLP(1, 32, hid_feat=(4, 16), activation=nn.ReLU())
 
@@ -85,7 +90,7 @@ class VecIntInitializer(nn.Module):
 		guess_var = self.var_decoder(var_total).reshape(x.size(0), self.n, self.fut_len, 2) # B, K, T, 2
 
 		sample_3d = torch.cat((guess_var, torch.zeros_like(guess_var[:, :, :,:1])), dim=-1)
-		# old_goal_sample = self.calculate_future_vectors_recursive(sample_3d, guess_intention, guess_similarity)
+		# goal_sample = self.calculate_future_vectors_recursive(sample_3d, guess_intention, guess_similarity)
 		goal_sample = self.solve_b_batch(sample_3d, guess_intention, guess_similarity) # B, K, T, 3
 		goal_sample = torch.cat([sample_3d[:, :, 0:1, :], goal_sample[:, :, :-1, :]], dim=2)
 
@@ -109,7 +114,7 @@ class VecIntInitializer(nn.Module):
 		# 初始化第一个a向量为x的第0帧
 		a = x[:, :, 0, :]  # 获取x的第0帧，形状 (B, M, 3)
 		
-		for t in range(1, T):
+		for t in range(T-1):
 			# 获取当前的意图向量和相似度向量
 			c = intention[:, :, t, :]  # 意图向量，形状 (B, M, 3)
 			d = similarity[:, :, t, :]  # 相似度标量，形状 (B, M, 1)
@@ -120,7 +125,7 @@ class VecIntInitializer(nn.Module):
 			# 将计算出的b向量添加到未来轨迹列表
 			future_vectors.append(b.unsqueeze(2))  # 添加到未来轨迹列表
 			
-			a =  x[:, :, t, :]  # 更新a向量为当前帧的x向量
+			a =  b  # 更新a向量为当前帧的b向量
 		
 		# 将未来向量拼接成 (B, M, T-1, 3)
 		future_vectors = torch.cat(future_vectors, dim=2)  # 形状为 (B, M, T-1, 3)
